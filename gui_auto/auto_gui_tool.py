@@ -170,6 +170,10 @@ class GuiAutoTool:
         default_retry_delay: float = 0.5,
         base_scale: Optional[float] = None,
         base_resolution: Optional[Tuple[int, int]] = None,
+        template_scale_info: Optional[dict] = None,
+        target_scale_info: Optional[dict] = None,
+        default_use_multi_scale: bool = False,
+        default_enhancement_level: str = "adaptive",
     ):
         """
         初始化GUI自动化工具
@@ -183,6 +187,10 @@ class GuiAutoTool:
             default_retry_delay: 默认重试延迟时间（秒）
             base_scale: 自定义基准DPI缩放，不指定则使用默认值1.0
             base_resolution: 自定义基准分辨率，不指定则使用默认值(1920, 1080)
+            template_scale_info: 默认模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+            target_scale_info: 默认目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+            default_use_multi_scale: 默认是否启用多尺度匹配
+            default_enhancement_level: 默认图像增强级别 ("light", "standard", "aggressive", "adaptive")
         """
         self.confidence = confidence
         self.timeout = timeout
@@ -194,6 +202,12 @@ class GuiAutoTool:
         # 保存自定义基准值
         self.base_scale = base_scale
         self.base_resolution = base_resolution
+        
+        # 保存默认缩放信息
+        self.default_template_scale_info = template_scale_info
+        self.default_target_scale_info = target_scale_info
+        self.default_use_multi_scale = default_use_multi_scale
+        self.default_enhancement_level = default_enhancement_level
 
         # 获取系统缩放信息（使用自定义基准值）
         self.scale_info = SystemInfo.get_scale_factors(
@@ -567,6 +581,12 @@ class GuiAutoTool:
         if template_scale_info and target_scale_info:
             base_scale = self._calculate_optimal_scale(
                 template_scale_info, target_scale_info
+            )
+        elif self.auto_scale and template_scale_info:
+            # 如果只有模板缩放信息，且启用了auto_scale
+            # 计算模板相对于当前系统基准的缩放
+            base_scale = self._calculate_optimal_scale(
+                template_scale_info, self.get_current_system_scale_info()
             )
 
         # 定义多个缩放比例进行尝试
@@ -991,6 +1011,9 @@ class GuiAutoTool:
     ) -> float:
         """
         根据模板和目标图像的缩放信息计算最优缩放比例
+        
+        注意：当启用auto_scale时，目标图像已经被调整到基准尺寸，
+        此时应该只考虑模板相对于基准的缩放比例
 
         Args:
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
@@ -1000,34 +1023,61 @@ class GuiAutoTool:
             计算出的最优缩放比例
         """
         try:
-            # 获取DPI缩放比例
-            template_dpi = template_scale_info.get("dpi_scale", 1.0)
-            target_dpi = target_scale_info.get("dpi_scale", 1.0)
+            # 如果启用了auto_scale，目标图像已经调整到基准尺寸
+            # 只需要考虑模板相对于基准的缩放
+            if self.auto_scale:
+                # 获取模板的缩放信息
+                template_dpi = template_scale_info.get("dpi_scale", 1.0)
+                template_res = template_scale_info.get("resolution", (1920, 1080))
+                
+                # 计算模板相对于基准的缩放比例
+                # 模板需要缩放到基准尺寸来匹配已经调整的目标图像
+                base_dpi = self.scale_info["base_scale"]
+                base_res = self.scale_info["base_resolution"]
+                
+                # 计算DPI缩放比例（模板到基准）
+                dpi_scale_ratio = base_dpi / template_dpi
+                
+                # 计算分辨率缩放比例（模板到基准）
+                res_scale_x = base_res[0] / template_res[0]
+                res_scale_y = base_res[1] / template_res[1]
+                res_scale_ratio = (res_scale_x + res_scale_y) / 2.0
+                
+                # 综合缩放比例
+                optimal_scale = dpi_scale_ratio * res_scale_ratio
+                
+                logger.debug(
+                    f"Auto-scale模式缩放计算: 模板DPI={template_dpi:.2f}, 基准DPI={base_dpi:.2f}, "
+                    f"DPI比例={dpi_scale_ratio:.3f}, 分辨率比例={res_scale_ratio:.3f}, "
+                    f"最终缩放={optimal_scale:.3f}"
+                )
+            else:
+                # 传统模式：直接计算模板和目标之间的缩放比例
+                template_dpi = template_scale_info.get("dpi_scale", 1.0)
+                target_dpi = target_scale_info.get("dpi_scale", 1.0)
 
-            # 获取分辨率信息
-            template_res = template_scale_info.get("resolution", (1920, 1080))
-            target_res = target_scale_info.get("resolution", (1920, 1080))
+                template_res = template_scale_info.get("resolution", (1920, 1080))
+                target_res = target_scale_info.get("resolution", (1920, 1080))
 
-            # 计算DPI缩放比例
-            dpi_scale_ratio = target_dpi / template_dpi
+                # 计算DPI缩放比例
+                dpi_scale_ratio = target_dpi / template_dpi
 
-            # 计算分辨率缩放比例（取平均值）
-            res_scale_x = target_res[0] / template_res[0]
-            res_scale_y = target_res[1] / template_res[1]
-            res_scale_ratio = (res_scale_x + res_scale_y) / 2.0
+                # 计算分辨率缩放比例（取平均值）
+                res_scale_x = target_res[0] / template_res[0]
+                res_scale_y = target_res[1] / template_res[1]
+                res_scale_ratio = (res_scale_x + res_scale_y) / 2.0
 
-            # 综合缩放比例
-            optimal_scale = dpi_scale_ratio * res_scale_ratio
+                # 综合缩放比例
+                optimal_scale = dpi_scale_ratio * res_scale_ratio
+
+                logger.debug(
+                    f"传统模式缩放计算: 模板DPI={template_dpi:.2f}, 目标DPI={target_dpi:.2f}, "
+                    f"DPI比例={dpi_scale_ratio:.3f}, 分辨率比例={res_scale_ratio:.3f}, "
+                    f"最终缩放={optimal_scale:.3f}"
+                )
 
             # 限制缩放比例在合理范围内
             optimal_scale = max(0.3, min(3.0, optimal_scale))
-
-            logger.debug(
-                f"缩放计算: 模板DPI={template_dpi:.2f}, 目标DPI={target_dpi:.2f}, "
-                f"DPI比例={dpi_scale_ratio:.3f}, 分辨率比例={res_scale_ratio:.3f}, "
-                f"最终缩放={optimal_scale:.3f}"
-            )
-
             return optimal_scale
 
         except Exception as e:
@@ -1046,17 +1096,45 @@ class GuiAutoTool:
             "resolution": self.scale_info["resolution"],
         }
 
+    def _get_effective_scale_info(
+        self, 
+        template_scale_info: Optional[dict] = None, 
+        target_scale_info: Optional[dict] = None
+    ) -> Tuple[Optional[dict], Optional[dict]]:
+        """
+        获取有效的缩放信息，优先使用参数传入的值，其次使用初始化时设置的默认值
+
+        Args:
+            template_scale_info: 方法调用时传入的模板缩放信息
+            target_scale_info: 方法调用时传入的目标缩放信息
+
+        Returns:
+            (有效的模板缩放信息, 有效的目标缩放信息)
+        """
+        # 优先使用参数传入的值，其次使用默认值
+        effective_template_info = template_scale_info or self.default_template_scale_info
+        effective_target_info = target_scale_info or self.default_target_scale_info
+        
+        # 如果没有指定目标缩放信息，使用当前系统信息
+        if effective_target_info is None:
+            effective_target_info = self.get_current_system_scale_info()
+            
+        return effective_template_info, effective_target_info
+
     def compare_images(
         self,
         template_path: Union[str, Path, np.ndarray],
         target_path: Union[str, Path, np.ndarray],
-        method: str = "TM_CCOEFF_NORMED",
+        method: Optional[str] = None,
         enhance_images: bool = True,
         save_result: bool = False,
         result_path: Optional[str] = None,
         return_system_coordinates: bool = False,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: Optional[bool] = None,
+        enhancement_level: Optional[str] = None,
+        use_feature_matching: bool = False,
     ) -> dict:
         """
         比较两张图片，返回匹配结果
@@ -1064,13 +1142,16 @@ class GuiAutoTool:
         Args:
             template_path: 模板图片路径或numpy数组
             target_path: 目标图片路径或numpy数组
-            method: 匹配方法
+            method: 匹配方法 ("TM_CCOEFF_NORMED", "TM_CCORR_NORMED", "TM_SQDIFF_NORMED")
             enhance_images: 是否进行图像增强
             save_result: 是否保存标注结果图片
             result_path: 结果图片保存路径
             return_system_coordinates: 是否返回系统坐标（默认返回基准坐标）
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+            use_multi_scale: 是否使用多尺度匹配算法，提高不同分辨率下的识别率
+            enhancement_level: 图像增强级别 ("light", "standard", "aggressive", "adaptive")
+            use_feature_matching: 是否强制使用特征匹配（SIFT/ORB），对旋转和缩放更鲁棒
 
         Returns:
             包含匹配结果的字典: {
@@ -1080,33 +1161,48 @@ class GuiAutoTool:
                 'found': bool,        # 是否找到匹配
                 'method': str,        # 使用的匹配方法
                 'scale': float,       # 匹配尺度
-                'result_image_path': str  # 结果图片路径（如果保存）
+                'result_image_path': str,  # 结果图片路径（如果保存）
+                'method_used': str,   # 实际使用的匹配算法 ("template_matching", "feature_matching", "hybrid_validated")
+                'coordinate_type': str  # 坐标类型 ("base" 或 "system")
             }
         """
+        # 使用默认值填充未指定的参数
+        effective_method = method or self.default_method
+        effective_use_multi_scale = use_multi_scale if use_multi_scale is not None else self.default_use_multi_scale
+        effective_enhancement_level = enhancement_level or self.default_enhancement_level
+        
+        # 获取有效的缩放信息
+        effective_template_info, effective_target_info = self._get_effective_scale_info(
+            template_scale_info, target_scale_info
+        )
+        
         # 定义核心比较逻辑
         return self._compare_images_core(
             template_path,
             target_path,
-            method,
+            effective_method,
             enhance_images,
             save_result,
             result_path,
             return_system_coordinates,
-            template_scale_info,
-            target_scale_info,
+            effective_template_info,
+            effective_target_info,
+            effective_use_multi_scale,
+            effective_enhancement_level,
+            use_feature_matching,
         )
 
     def _unified_image_matching_core(
         self,
         template: Union[str, Path, np.ndarray],
         target_image: Union[str, Path, np.ndarray],
-        method: str = "TM_CCOEFF_NORMED",
+        method: Optional[str] = None,
         enhance_images: bool = True,
         region: Optional[Tuple[int, int, int, int]] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
-        use_multi_scale: bool = True,
-        enhancement_level: str = "adaptive",
+        use_multi_scale: Optional[bool] = None,
+        enhancement_level: Optional[str] = None,
     ) -> dict:
         """
         统一的图像匹配核心函数
@@ -1133,6 +1229,16 @@ class GuiAutoTool:
             }
         """
         try:
+            # 使用默认值填充未指定的参数
+            effective_method = method or self.default_method
+            effective_use_multi_scale = use_multi_scale if use_multi_scale is not None else self.default_use_multi_scale
+            effective_enhancement_level = enhancement_level or self.default_enhancement_level
+            
+            # 获取有效的缩放信息
+            effective_template_info, effective_target_info = self._get_effective_scale_info(
+                template_scale_info, target_scale_info
+            )
+            
             # 加载图像
             template_img = self.load_image(template)
             target_img = self.load_image(target_image)
@@ -1154,10 +1260,10 @@ class GuiAutoTool:
             # 图像预处理
             if enhance_images:
                 template_processed = self.preprocess_image(
-                    template_img, enhance=True, enhancement_level=enhancement_level
+                    template_img, enhance=True, enhancement_level=effective_enhancement_level
                 )
                 target_processed = self.preprocess_image(
-                    target_img, enhance=True, enhancement_level=enhancement_level
+                    target_img, enhance=True, enhancement_level=effective_enhancement_level
                 )
             else:
                 template_processed = template_img
@@ -1170,34 +1276,34 @@ class GuiAutoTool:
                 "TM_SQDIFF_NORMED": cv2.TM_SQDIFF_NORMED,
             }
 
-            cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
+            cv_method = methods.get(effective_method, cv2.TM_CCOEFF_NORMED)
 
             # 执行匹配算法
-            if enhancement_level == "adaptive" and use_multi_scale:
+            if effective_enhancement_level == "adaptive" and effective_use_multi_scale:
                 # 自适应增强模式下使用混合匹配
                 match_result = self._hybrid_matching(
                     template_processed,
                     target_processed,
                     cv_method,
-                    template_scale_info,
-                    target_scale_info,
+                    effective_template_info,
+                    effective_target_info,
                     region_offset,
                 )
-            elif use_multi_scale:
+            elif effective_use_multi_scale:
                 # 多尺度模板匹配
                 match_result = self._multi_scale_template_matching(
                     template_processed,
                     target_processed,
                     cv_method,
-                    template_scale_info,
-                    target_scale_info,
+                    effective_template_info,
+                    effective_target_info,
                     region_offset,
                 )
             else:
                 # 单尺度匹配
-                if template_scale_info and target_scale_info:
+                if effective_template_info and effective_target_info:
                     scale = self._calculate_optimal_scale(
-                        template_scale_info, target_scale_info
+                        effective_template_info, effective_target_info
                     )
                     logger.info(f"智能缩放：计算出的精确缩放比例为 {scale:.3f}")
                 else:
@@ -1230,7 +1336,7 @@ class GuiAutoTool:
                 "location": best_location,  # 基准坐标
                 "center": best_center,  # 基准中心点
                 "found": best_confidence >= self.confidence,
-                "method": method,
+                "method": effective_method,
                 "scale": best_scale,
                 "template_shape": template_img.shape,
                 "target_shape": target_img.shape,
@@ -1249,7 +1355,7 @@ class GuiAutoTool:
                 "location": None,
                 "center": None,
                 "found": False,
-                "method": method,
+                "method": effective_method,
                 "scale": 1.0,
                 "template_shape": None,
                 "target_shape": None,
@@ -1267,20 +1373,64 @@ class GuiAutoTool:
         return_system_coordinates: bool,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: bool = True,
+        enhancement_level: str = "adaptive",
+        use_feature_matching: bool = False,
     ) -> dict:
         """
         compare_images 的核心实现逻辑 - 使用统一的核心匹配函数
         """
-        # 使用统一的核心匹配函数进行图像匹配
-        match_result = self._unified_image_matching_core(
-            template=template_path,
-            target_image=target_path,
-            method=method,
-            enhance_images=enhance_images,
-            region=None,  # compare_images 不使用区域限制
-            template_scale_info=template_scale_info,
-            target_scale_info=target_scale_info,
-        )
+        # 根据参数选择匹配策略
+        if use_feature_matching:
+            # 强制使用特征匹配
+            template_img = self.load_image(template_path)
+            target_img = self.load_image(target_path)
+            
+            # 将目标图像调整到基准尺寸
+            if self.auto_scale:
+                target_img = self.adjust_target_image_to_base(target_img)
+            
+            # 图像预处理
+            if enhance_images:
+                template_processed = self.preprocess_image(
+                    template_img, enhance=True, enhancement_level=enhancement_level
+                )
+                target_processed = self.preprocess_image(
+                    target_img, enhance=True, enhancement_level=enhancement_level
+                )
+            else:
+                template_processed = template_img
+                target_processed = target_img
+            
+            # 执行特征匹配
+            feature_result = self._feature_based_matching(template_processed, target_processed)
+            match_result = {
+                "confidence": feature_result["confidence"],
+                "location": feature_result["location"],
+                "center": (
+                    feature_result["location"][0] + feature_result["location"][2] // 2,
+                    feature_result["location"][1] + feature_result["location"][3] // 2
+                ) if feature_result["location"] else None,
+                "found": feature_result["confidence"] >= self.confidence,
+                "method": "FEATURE_MATCHING",
+                "scale": feature_result["scale"],
+                "template_shape": template_img.shape,
+                "target_shape": target_img.shape,
+                "method_used": "feature_matching"
+            }
+        else:
+            # 使用统一的核心匹配函数进行图像匹配
+            match_result = self._unified_image_matching_core(
+                template=template_path,
+                target_image=target_path,
+                method=method,
+                enhance_images=enhance_images,
+                region=None,  # compare_images 不使用区域限制
+                template_scale_info=template_scale_info,
+                target_scale_info=target_scale_info,
+                use_multi_scale=use_multi_scale,
+                enhancement_level=enhancement_level,
+            )
 
         # 检查匹配是否成功
         if "error" in match_result:
@@ -1326,6 +1476,10 @@ class GuiAutoTool:
             "system_info": self.scale_info,
             "result_image_path": None,
             "coordinate_type": "system" if return_system_coordinates else "base",
+            "method_used": match_result.get("method_used", "template_matching"),  # 实际使用的匹配算法
+            "enhancement_level": enhancement_level,  # 使用的增强级别
+            "multi_scale_enabled": use_multi_scale,  # 是否启用了多尺度匹配
+            "feature_matching_forced": use_feature_matching,  # 是否强制使用特征匹配
         }
 
         # 保存标注结果图片
@@ -1406,15 +1560,15 @@ class GuiAutoTool:
         template: Union[str, Path, np.ndarray],
         target_image: Union[str, Path, np.ndarray],
         region: Optional[Tuple[int, int, int, int]] = None,
-        method: str = "TM_CCOEFF_NORMED",
+        method: Optional[str] = None,
         enhance_images: bool = True,
         try_multiple_methods: bool = False,
         max_retries: Optional[int] = None,
         retry_delay: Optional[float] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
-        use_multi_scale: bool = False,
-        enhancement_level: str = "adaptive",
+        use_multi_scale: Optional[bool] = None,
+        enhancement_level: Optional[str] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         在目标图像中查找模板图像
@@ -1442,6 +1596,16 @@ class GuiAutoTool:
         if retry_delay is None:
             retry_delay = self.default_retry_delay
 
+        # 使用默认值填充未指定的参数
+        effective_method = method or self.default_method
+        effective_use_multi_scale = use_multi_scale if use_multi_scale is not None else self.default_use_multi_scale
+        effective_enhancement_level = enhancement_level or self.default_enhancement_level
+        
+        # 获取有效的缩放信息
+        effective_template_info, effective_target_info = self._get_effective_scale_info(
+            template_scale_info, target_scale_info
+        )
+
         # 定义核心查找逻辑
         def _find_core():
             if try_multiple_methods:
@@ -1449,22 +1613,22 @@ class GuiAutoTool:
                     template,
                     target_image,
                     region,
-                    template_scale_info,
-                    target_scale_info,
-                    use_multi_scale,
-                    enhancement_level,
+                    effective_template_info,
+                    effective_target_info,
+                    effective_use_multi_scale,
+                    effective_enhancement_level,
                 )
             else:
                 return self._find_image_in_target_core(
                     template,
                     target_image,
                     region,
-                    method,
+                    effective_method,
                     enhance_images,
-                    template_scale_info,
-                    target_scale_info,
-                    use_multi_scale,
-                    enhancement_level,
+                    effective_template_info,
+                    effective_target_info,
+                    effective_use_multi_scale,
+                    effective_enhancement_level,
                 )
 
         # 执行重试逻辑
