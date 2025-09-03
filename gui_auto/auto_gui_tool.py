@@ -468,6 +468,178 @@ class GuiAutoTool:
             return_system_coordinates,
         )
 
+    def _unified_image_matching_core(
+        self,
+        template: Union[str, Path, np.ndarray],
+        target_image: Union[str, Path, np.ndarray],
+        method: str = "TM_CCOEFF_NORMED",
+        multi_scale: bool = True,
+        enhance_images: bool = True,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        scales: Optional[list] = None,
+    ) -> dict:
+        """
+        统一的图像匹配核心函数
+        
+        Args:
+            template: 模板图像路径或numpy数组
+            target_image: 目标图像路径或numpy数组
+            method: 匹配方法
+            multi_scale: 是否使用多尺度匹配
+            enhance_images: 是否进行图像增强
+            region: 搜索区域 (x, y, w, h) - 基准坐标
+            scales: 自定义缩放比例列表
+            
+        Returns:
+            包含匹配结果的字典: {
+                'confidence': float,    # 置信度
+                'location': tuple,      # 匹配位置 (x, y, w, h) - 基准坐标
+                'center': tuple,        # 匹配中心点 (x, y) - 基准坐标
+                'found': bool,          # 是否找到匹配
+                'method': str,          # 使用的匹配方法
+                'scale': float,         # 最佳匹配尺度
+                'template_shape': tuple,# 模板图像形状
+                'target_shape': tuple,  # 目标图像形状
+            }
+        """
+        try:
+            # 加载图像
+            template_img = self.load_image(template)
+            target_img = self.load_image(target_image)
+
+            if template_img is None or target_img is None:
+                raise ValueError("无法加载图片文件")
+
+            # 将目标图像调整到基准尺寸（在处理前转换）
+            if self.auto_scale:
+                target_img = self.adjust_target_image_to_base(target_img)
+
+            # 如果指定了搜索区域，裁剪目标图像（region应该是基准坐标）
+            region_offset = (0, 0)
+            if region:
+                x, y, w, h = region
+                target_img = target_img[y : y + h, x : x + w]
+                region_offset = (x, y)
+
+            # 图像预处理
+            if enhance_images:
+                template_processed = self.preprocess_image(template_img, enhance=True)
+                target_processed = self.preprocess_image(target_img, enhance=True)
+            else:
+                template_processed = template_img
+                target_processed = target_img
+
+            # 方法映射
+            methods = {
+                "TM_CCOEFF_NORMED": cv2.TM_CCOEFF_NORMED,
+                "TM_CCORR_NORMED": cv2.TM_CCORR_NORMED,
+                "TM_SQDIFF_NORMED": cv2.TM_SQDIFF_NORMED,
+            }
+
+            cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
+
+            # 设置缩放比例
+            if scales is None:
+                if multi_scale:
+                    scales = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+                else:
+                    scales = [1.0]
+
+            # 多尺度匹配
+            best_confidence = 0
+            best_location = None
+            best_scale = 1.0
+            best_match_loc = None
+
+            logger.debug(
+                f"开始图像匹配，方法: {method}, 多尺度: {multi_scale}, 增强: {enhance_images}"
+            )
+
+            for scale in scales:
+                # 缩放模板图像
+                if scale != 1.0:
+                    scaled_template = cv2.resize(
+                        template_processed,
+                        None,
+                        fx=scale,
+                        fy=scale,
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                else:
+                    scaled_template = template_processed
+
+                # 确保模板不大于目标图像
+                if (
+                    scaled_template.shape[0] > target_processed.shape[0]
+                    or scaled_template.shape[1] > target_processed.shape[1]
+                ):
+                    continue
+
+                # 执行模板匹配
+                result = cv2.matchTemplate(target_processed, scaled_template, cv_method)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 根据方法选择合适的值和位置
+                if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
+                    confidence = 1 - min_val
+                    match_loc = min_loc
+                else:
+                    confidence = max_val
+                    match_loc = max_loc
+
+                logger.debug(f"尺度 {scale:.1f}, 置信度: {confidence:.3f}")
+
+                # 记录最佳匹配
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    h, w = scaled_template.shape[:2]
+                    # 计算在原始目标图像中的位置（加上region偏移）
+                    location_x = match_loc[0] + region_offset[0]
+                    location_y = match_loc[1] + region_offset[1]
+                    best_location = (location_x, location_y, w, h)
+                    best_scale = scale
+                    best_match_loc = match_loc
+
+            # 计算中心点
+            best_center = None
+            if best_location:
+                best_center = (
+                    best_location[0] + best_location[2] // 2,
+                    best_location[1] + best_location[3] // 2,
+                )
+
+            # 准备返回结果
+            result_dict = {
+                "confidence": best_confidence,
+                "location": best_location,  # 基准坐标
+                "center": best_center,      # 基准中心点
+                "found": best_confidence >= self.confidence,
+                "method": method,
+                "scale": best_scale,
+                "template_shape": template_img.shape,
+                "target_shape": target_img.shape,
+            }
+
+            logger.debug(
+                f"图像匹配完成 - 置信度: {best_confidence:.3f}, 找到: {result_dict['found']}"
+            )
+
+            return result_dict
+
+        except Exception as e:
+            logger.error(f"图像匹配失败: {e}")
+            return {
+                "confidence": 0.0,
+                "location": None,
+                "center": None,
+                "found": False,
+                "method": method,
+                "scale": 1.0,
+                "template_shape": None,
+                "target_shape": None,
+                "error": str(e),
+            }
+
     def _compare_images_core(
         self,
         template_path: Union[str, Path, np.ndarray],
@@ -480,107 +652,32 @@ class GuiAutoTool:
         return_system_coordinates: bool,
     ) -> dict:
         """
-        compare_images 的核心实现逻辑
+        compare_images 的核心实现逻辑 - 使用统一的核心匹配函数
         """
-        # 加载图像
-        template = self.load_image(template_path)
-        target = self.load_image(target_path)
-
-        if template is None or target is None:
-            raise ValueError("无法加载图片文件")
-
-        # 将目标图像调整到基准尺寸（在处理前转换）
-        if self.auto_scale:
-            target = self.adjust_target_image_to_base(target)
-            # 模板图像不需要额外调整，因为已经是基准尺寸
-
-        # 图像预处理
-        if enhance_images:
-            template_processed = self.preprocess_image(template, enhance=True)
-            target_processed = self.preprocess_image(target, enhance=True)
-        else:
-            template_processed = template
-            target_processed = target
-
-        # 方法映射
-        methods = {
-            "TM_CCOEFF_NORMED": cv2.TM_CCOEFF_NORMED,
-            "TM_CCORR_NORMED": cv2.TM_CCORR_NORMED,
-            "TM_SQDIFF_NORMED": cv2.TM_SQDIFF_NORMED,
-        }
-
-        cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
-
-        # 多尺度匹配
-        best_confidence = 0
-        best_location = None
-        best_scale = 1.0
-        best_match_loc = None
-
-        if multi_scale:
-            scales = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
-        else:
-            scales = [1.0]
-
-        logger.info(
-            f"开始图像匹配，方法: {method}, 多尺度: {multi_scale}, 增强: {enhance_images}"
+        # 使用统一的核心匹配函数进行图像匹配
+        match_result = self._unified_image_matching_core(
+            template=template_path,
+            target_image=target_path,
+            method=method,
+            multi_scale=multi_scale,
+            enhance_images=enhance_images,
+            region=None,  # compare_images 不使用区域限制
         )
 
-        for scale in scales:
-            # 缩放模板图像
-            if scale != 1.0:
-                scaled_template = cv2.resize(
-                    template_processed,
-                    None,
-                    fx=scale,
-                    fy=scale,
-                    interpolation=cv2.INTER_CUBIC,
-                )
-            else:
-                scaled_template = template_processed
+        # 检查匹配是否成功
+        if "error" in match_result:
+            raise ValueError(f"图像匹配失败: {match_result['error']}")
 
-            # 确保模板不大于目标图像
-            if (
-                scaled_template.shape[0] > target_processed.shape[0]
-                or scaled_template.shape[1] > target_processed.shape[1]
-            ):
-                continue
+        # 获取基准坐标
+        base_location = match_result["location"]
+        base_center = match_result["center"]
+        best_confidence = match_result["confidence"]
+        best_scale = match_result["scale"]
 
-            # 执行模板匹配
-            result = cv2.matchTemplate(target_processed, scaled_template, cv_method)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-
-            # 根据方法选择合适的值和位置
-            if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
-                confidence = 1 - min_val
-                match_loc = min_loc
-            else:
-                confidence = max_val
-                match_loc = max_loc
-
-            logger.debug(f"尺度 {scale:.1f}, 置信度: {confidence:.3f}")
-
-            # 记录最佳匹配
-            if confidence > best_confidence:
-                best_confidence = confidence
-                h, w = scaled_template.shape[:2]
-                best_location = (match_loc[0], match_loc[1], w, h)
-                best_scale = scale
-                best_match_loc = match_loc
-
-        # 现在best_location已经是基准坐标
-        base_location = best_location
-        base_center = None
+        # 计算系统坐标
         system_location = None
         system_center = None
-
         if base_location:
-            # 计算基准中心点
-            base_center = (
-                base_location[0] + base_location[2] // 2,
-                base_location[1] + base_location[3] // 2,
-            )
-
             # 如果需要系统坐标，进行转换
             if return_system_coordinates:
                 system_location = self.adjust_coordinates_to_scale(base_location)
@@ -604,7 +701,7 @@ class GuiAutoTool:
             "base_center": base_center,  # 基准中心点（总是提供）
             "system_location": system_location,  # 系统坐标（如果需要）
             "system_center": system_center,  # 系统中心点（如果需要）
-            "found": best_confidence >= self.confidence,
+            "found": match_result["found"],
             "method": method,
             "scale": best_scale,
             "system_scale_factor": self.scale_info["combined_factor"],
@@ -892,116 +989,49 @@ class GuiAutoTool:
         enhance_images: bool,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
-        find_image_in_target 的核心实现逻辑
+        find_image_in_target 的核心实现逻辑 - 使用统一的核心匹配函数
         """
-        # 加载目标图像
-        if isinstance(target_image, (str, Path)):
-            target_img = self.load_template(target_image)
-        else:
-            target_img = target_image
-
-        # 将目标图像调整到基准尺寸（在处理前转换）
-        if self.auto_scale:
-            target_img = self.adjust_target_image_to_base(target_img)
-
-        # 如果指定了搜索区域，裁剪目标图像（region应该是基准坐标）
-        if region:
-            x, y, w, h = region
-            target_img = target_img[y : y + h, x : x + w]
-
-        # 加载模板图像
-        if isinstance(template, (str, Path)):
-            template_img = self.load_template(template)
-        else:
-            template_img = template
-
-        # 图像预处理增强
-        if enhance_images:
-            target_img = self.preprocess_image(target_img, enhance=True)
-            template_img = self.preprocess_image(template_img, enhance=True)
-
-        # 方法映射
-        methods = {
-            "TM_CCOEFF_NORMED": cv2.TM_CCOEFF_NORMED,
-            "TM_CCORR_NORMED": cv2.TM_CCORR_NORMED,
-            "TM_SQDIFF_NORMED": cv2.TM_SQDIFF_NORMED,
-        }
-
-        cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
-
-        # 多尺度匹配以提高准确性
-        best_confidence = 0
-        best_location = None
-        best_scale = 1.0
-
-        if multi_scale:
-            scales = [0.8, 0.9, 1.0, 1.1, 1.2]  # 尝试不同缩放比例
-        else:
-            scales = [1.0]
-
-        for scale in scales:
-            # 缩放模板图像
-            if scale != 1.0:
-                scaled_template = cv2.resize(
-                    template_img,
-                    None,
-                    fx=scale,
-                    fy=scale,
-                    interpolation=cv2.INTER_CUBIC,
-                )
-            else:
-                scaled_template = template_img
-
-            # 确保模板不大于目标图像
-            if (
-                scaled_template.shape[0] > target_img.shape[0]
-                or scaled_template.shape[1] > target_img.shape[1]
-            ):
-                continue
-
-            # 执行模板匹配
-            result = cv2.matchTemplate(target_img, scaled_template, cv_method)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-
-            # 根据方法选择合适的值和位置
-            if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
-                confidence = 1 - min_val
-                match_loc = min_loc
-            else:
-                confidence = max_val
-                match_loc = max_loc
-
-            logger.debug(f"尺度 {scale:.1f}, 置信度: {confidence:.3f}")
-
-            # 记录最佳匹配
-            if confidence > best_confidence:
-                best_confidence = confidence
-                h, w = scaled_template.shape[:2]
-                left, top = match_loc
-                best_location = (left, top, w, h)
-
-            # 如果指定了搜索区域，需要调整坐标
-            if region:
-                left += region[0]
-                top += region[1]
-
-                best_location = (left, top, w, h)
-                best_scale = scale
-
-        logger.debug(
-            f"最佳匹配 - 置信度: {best_confidence:.3f}, 尺度: {best_scale:.1f}"
-        )
-
-        if best_confidence >= self.confidence:
-            logger.info(
-                f"找到图像，置信度: {best_confidence:.3f}, 位置: {best_location}, 尺度: {best_scale:.1f}"
+        try:
+            # 设置find_image专用的缩放比例（与compare_images稍有不同）
+            scales = [0.8, 0.9, 1.0, 1.1, 1.2] if multi_scale else [1.0]
+            
+            # 使用统一的核心匹配函数进行图像匹配
+            match_result = self._unified_image_matching_core(
+                template=template,
+                target_image=target_image,
+                method=method,
+                multi_scale=multi_scale,
+                enhance_images=enhance_images,
+                region=region,
+                scales=scales,  # 使用find_image专用的缩放比例
             )
-            return best_location
 
-        print(f"未找到图像，最高置信度: {best_confidence:.3f}")
-        logger.debug(f"未找到图像，最高置信度: {best_confidence:.3f}")
-        # exit()
-        return None
+            # 检查匹配是否成功
+            if "error" in match_result:
+                logger.error(f"图像匹配失败: {match_result['error']}")
+                return None
+
+            best_confidence = match_result["confidence"]
+            best_location = match_result["location"]
+            best_scale = match_result["scale"]
+
+            logger.debug(
+                f"最佳匹配 - 置信度: {best_confidence:.3f}, 尺度: {best_scale:.1f}"
+            )
+
+            if match_result["found"]:
+                logger.info(
+                    f"找到图像，置信度: {best_confidence:.3f}, 位置: {best_location}, 尺度: {best_scale:.1f}"
+                )
+                return best_location
+
+            print(f"未找到图像，最高置信度: {best_confidence:.3f}")
+            logger.debug(f"未找到图像，最高置信度: {best_confidence:.3f}")
+            return None
+
+        except Exception as e:
+            logger.error(f"查找图像失败: {e}")
+            return None
 
     def _find_image_multiple_methods_core(
         self,
@@ -1011,7 +1041,7 @@ class GuiAutoTool:
         multi_scale: bool,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
-        多方法图像匹配的核心实现逻辑
+        多方法图像匹配的核心实现逻辑 - 使用统一的核心匹配函数
         """
         methods_to_try = ["TM_CCOEFF_NORMED", "TM_CCORR_NORMED"]
         enhancement_options = [True, False]
@@ -1026,32 +1056,47 @@ class GuiAutoTool:
         for method in methods_to_try:
             for enhance in enhancement_options:
                 try:
-                    result = self._find_image_in_target_core(
-                        template, target_image, region, method, multi_scale, enhance
+                    # 设置find_image专用的缩放比例
+                    scales = [0.8, 0.9, 1.0, 1.1, 1.2] if multi_scale else [1.0]
+                    
+                    # 使用统一的核心匹配函数
+                    match_result = self._unified_image_matching_core(
+                        template=template,
+                        target_image=target_image,
+                        method=method,
+                        multi_scale=multi_scale,
+                        enhance_images=enhance,
+                        region=region,
+                        scales=scales,
                     )
 
-                    if result:
-                        # 简单使用匹配成功作为判断标准，避免重新计算置信度的复杂逻辑
+                    if match_result["found"]:
+                        result = match_result["location"]
+                        confidence = match_result["confidence"]
+                        
+                        # 使用实际置信度进行比较，同时考虑方法优先级
                         # 优先级：CCOEFF_NORMED > CCORR_NORMED，增强 > 不增强
-                        priority_score = 0
+                        priority_bonus = 0
                         if method == "TM_CCOEFF_NORMED":
-                            priority_score += 2
+                            priority_bonus += 0.1
                         if enhance:
-                            priority_score += 1
+                            priority_bonus += 0.05
+                            
+                        adjusted_confidence = confidence + priority_bonus
 
-                        if priority_score > best_confidence or best_result is None:
-                            best_confidence = priority_score
+                        if adjusted_confidence > best_confidence or best_result is None:
+                            best_confidence = adjusted_confidence
                             best_result = result
                             best_method = method
                             best_enhance = enhance
                             logger.debug(
-                                f"找到匹配 - 方法: {method}, 增强: {enhance}, 位置: {result}"
+                                f"找到匹配 - 方法: {method}, 增强: {enhance}, 置信度: {confidence:.3f}, 位置: {result}"
                             )
 
                         # 如果用最优配置找到了结果，直接返回
                         if method == "TM_CCOEFF_NORMED" and enhance:
                             logger.info(
-                                f"使用最优配置找到匹配: {method}, 增强: {enhance}"
+                                f"使用最优配置找到匹配: {method}, 增强: {enhance}, 置信度: {confidence:.3f}"
                             )
                             return result
 
@@ -1061,7 +1106,7 @@ class GuiAutoTool:
 
         if best_result:
             logger.info(
-                f"多方法匹配成功 - 最佳方法: {best_method}, 增强: {best_enhance}"
+                f"多方法匹配成功 - 最佳方法: {best_method}, 增强: {best_enhance}, 置信度: {best_confidence:.3f}"
             )
 
         return best_result
@@ -1348,133 +1393,3 @@ class GuiAutoTool:
             return False
 
 
-def main():
-    """示例用法"""
-    # 创建GUI自动化工具实例
-    gui_tool = GuiAutoTool(
-        confidence=0.8,  # 降低阈值以便演示
-        timeout=10.0,
-        default_method="TM_CCOEFF_NORMED",
-        use_advanced_matching=True,
-        default_max_retries=3,  # 默认重试3次
-        default_retry_delay=0.5,  # 默认重试延迟0.5秒
-    )
-
-    print("GUI自动化工具已初始化")
-    print("=" * 50)
-    print("主要功能:")
-    print("- 两张图片对比匹配")
-    print("- 多种匹配算法选择")
-    print("- 多尺度匹配")
-    print("- 图像预处理增强")
-    print("- 匹配结果可视化")
-    print("- 屏幕自动化操作")
-    print("- 智能重试机制")
-    print()
-
-    # 演示图像比较功能
-    template_path = "templates/example_file3.png"
-    target_path = "templates/main_125.png"  # 这里可以是不同的图片
-
-    print("=== 图像比较功能演示 ===")
-
-    # 检查文件是否存在
-    from pathlib import Path
-
-    if Path(template_path).exists() and Path(target_path).exists():
-        print(f"模板图片: {template_path}")
-        print(f"目标图片: {target_path}")
-
-        # 单个方法比较
-        print("\n1. 单个方法比较:")
-        try:
-            result = gui_tool.compare_images(
-                template_path=template_path,
-                target_path=target_path,
-                method="TM_CCOEFF_NORMED",
-                multi_scale=True,
-                enhance_images=True,
-                save_result=True,
-                result_path="single_method_result.png",
-                max_retries=5,  # 演示自定义重试次数
-                retry_delay=0.3,  # 演示自定义重试延迟
-            )
-
-            print(f"   置信度: {result['confidence']:.3f}")
-            print(f"   坐标类型: {result['coordinate_type']}")
-            print(
-                f"   返回坐标: {result['location']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})"
-            )
-            print(
-                f"   返回中心点: {result['center']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})"
-            )
-            print(f"   基准坐标: {result['base_location']}")
-            print(f"   基准中心点: {result['base_center']}")
-            if result["system_location"]:
-                print(f"   系统坐标: {result['system_location']}")
-                print(f"   系统中心点: {result['system_center']}")
-            print(f"   是否找到: {result['found']}")
-            print(f"   使用方法: {result['method']}")
-            print(f"   模板缩放: {result['scale']:.1f}")
-            print(f"   系统缩放因子: {result['system_scale_factor']:.2f}")
-            print(
-                f"   当前分辨率: {result['system_info']['resolution'][0]}x{result['system_info']['resolution'][1]}"
-            )
-            print(f"   DPI缩放: {result['system_info']['dpi_scale']:.2f}")
-            if result["result_image_path"]:
-                print(f"   结果图片: {result['result_image_path']}")
-
-            # 演示返回系统坐标的情况
-            print("\n   演示返回系统坐标:")
-            result_sys = gui_tool.compare_images(
-                template_path=template_path,
-                target_path=target_path,
-                method="TM_CCOEFF_NORMED",
-                return_system_coordinates=True,
-                max_retries=1,
-            )
-            print(f"   系统坐标模式 - 返回坐标: {result_sys['location']}")
-            print(f"   系统坐标模式 - 返回中心点: {result_sys['center']}")
-        except Exception as e:
-            print(f"   错误: {e}")
-
-        # 多方法比较
-        print("\n2. 多方法比较:")
-        try:
-            results = gui_tool.compare_multiple_methods(
-                template_path=template_path,
-                target_path=target_path,
-                methods=["TM_CCOEFF_NORMED", "TM_CCORR_NORMED", "TM_SQDIFF_NORMED"],
-                save_results=True,
-                max_retries=3,  # 演示重试功能
-                retry_delay=0.5,
-            )
-
-            import rich
-
-            rich.print(results)
-            # print(results)
-            # print("   各方法结果:")
-            # for method, result in results.items():
-            #     if isinstance(result, dict) and "confidence" in result:
-            #         print(f"     {method}: 置信度 {result['confidence']:.3f}")
-
-            #     print(method)
-            #     print("==========================================")
-            #     print(results)
-
-        except Exception as e:
-            print(f"   错误: {e}")
-
-    else:
-        print("演示文件不存在，请将图片放入 templates/ 目录")
-        print("建议创建以下文件:")
-        print("- templates/template.png (模板图片)")
-        print("- templates/target.png (目标图片)")
-
-        # 创建演示代码
-        print("\n演示代码:")
-
-
-if __name__ == "__main__":
-    main()
