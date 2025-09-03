@@ -210,3 +210,5 @@ uv.lock
 
 main.py
 image
+
+test_*

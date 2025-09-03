@@ -387,13 +387,19 @@ class GuiAutoTool:
             # 使用现有的 load_template 方法加载文件
             return self.load_template(image_input)
 
-    def preprocess_image(self, image: np.ndarray, enhance: bool = True) -> np.ndarray:
+    def preprocess_image(
+        self,
+        image: np.ndarray,
+        enhance: bool = True,
+        enhancement_level: str = "standard",
+    ) -> np.ndarray:
         """
         图像预处理以提高匹配精度
 
         Args:
             image: 输入图像
             enhance: 是否进行图像增强
+            enhancement_level: 增强级别 ("light", "standard", "aggressive", "adaptive")
 
         Returns:
             处理后的图像
@@ -401,6 +407,17 @@ class GuiAutoTool:
         if not enhance:
             return image
 
+        if enhancement_level == "adaptive":
+            return self._adaptive_image_enhancement(image)
+        elif enhancement_level == "light":
+            return self._light_image_enhancement(image)
+        elif enhancement_level == "aggressive":
+            return self._aggressive_image_enhancement(image)
+        else:  # standard
+            return self._standard_image_enhancement(image)
+
+    def _standard_image_enhancement(self, image: np.ndarray) -> np.ndarray:
+        """标准图像增强（原有逻辑）"""
         # 转换为Lab颜色空间进行处理
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -418,52 +435,601 @@ class GuiAutoTool:
 
         return enhanced
 
+    def _light_image_enhancement(self, image: np.ndarray) -> np.ndarray:
+        """轻度图像增强，适用于高质量图像"""
+        # 轻微的对比度增强
+        enhanced = cv2.convertScaleAbs(image, alpha=1.1, beta=5)
+
+        # 轻微的锐化
+        kernel = np.array([[-0.5, -0.5, -0.5], [-0.5, 5.0, -0.5], [-0.5, -0.5, -0.5]])
+        enhanced = cv2.filter2D(enhanced, -1, kernel)
+
+        return enhanced
+
+    def _aggressive_image_enhancement(self, image: np.ndarray) -> np.ndarray:
+        """激进图像增强，适用于低质量或模糊图像"""
+        # 转换为Lab颜色空间
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+
+        # 强对比度限制自适应直方图均衡
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(6, 6))
+        l = clahe.apply(l)
+
+        # 合并通道并转换回BGR
+        enhanced = cv2.merge([l, a, b])
+        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+        # 强锐化滤波器
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        enhanced = cv2.filter2D(enhanced, -1, kernel)
+
+        # 边缘增强
+        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        enhanced = cv2.addWeighted(enhanced, 0.8, edges_colored, 0.2, 0)
+
+        # 降噪（在锐化后进行）
+        enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
+
+        return enhanced
+
+    def _adaptive_image_enhancement(self, image: np.ndarray) -> np.ndarray:
+        """自适应图像增强，根据图像特性选择最佳增强策略"""
+        # 分析图像质量指标
+        quality_metrics = self._analyze_image_quality(image)
+
+        # 根据质量指标选择增强策略
+        if quality_metrics["sharpness"] > 0.7 and quality_metrics["contrast"] > 0.6:
+            # 高质量图像，使用轻度增强
+            return self._light_image_enhancement(image)
+        elif quality_metrics["sharpness"] < 0.3 or quality_metrics["contrast"] < 0.3:
+            # 低质量图像，使用激进增强
+            return self._aggressive_image_enhancement(image)
+        else:
+            # 中等质量图像，使用标准增强
+            enhanced = self._standard_image_enhancement(image)
+
+            # 根据具体问题进行额外处理
+            if quality_metrics["noise_level"] > 0.5:
+                # 高噪声，增加降噪
+                enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
+
+            if quality_metrics["brightness"] < 0.3:
+                # 过暗，增加亮度
+                enhanced = cv2.convertScaleAbs(enhanced, alpha=1.0, beta=30)
+            elif quality_metrics["brightness"] > 0.8:
+                # 过亮，降低亮度
+                enhanced = cv2.convertScaleAbs(enhanced, alpha=1.0, beta=-20)
+
+            return enhanced
+
+    def _analyze_image_quality(self, image: np.ndarray) -> dict:
+        """分析图像质量指标"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # 计算锐度（使用拉普拉斯算子的方差）
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        sharpness = laplacian.var()
+        sharpness_normalized = min(1.0, sharpness / 1000.0)  # 归一化到0-1
+
+        # 计算对比度（标准差）
+        contrast = gray.std()
+        contrast_normalized = min(1.0, contrast / 127.0)  # 归一化到0-1
+
+        # 计算亮度（平均值）
+        brightness = gray.mean()
+        brightness_normalized = brightness / 255.0  # 归一化到0-1
+
+        # 估算噪声水平（使用高频成分）
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        noise = cv2.absdiff(gray, blur)
+        noise_level = noise.mean()
+        noise_normalized = min(1.0, noise_level / 50.0)  # 归一化到0-1
+
+        return {
+            "sharpness": sharpness_normalized,
+            "contrast": contrast_normalized,
+            "brightness": brightness_normalized,
+            "noise_level": noise_normalized,
+        }
+
+    def _multi_scale_template_matching(
+        self,
+        template: np.ndarray,
+        target: np.ndarray,
+        cv_method: int,
+        template_scale_info: Optional[dict] = None,
+        target_scale_info: Optional[dict] = None,
+        region_offset: Tuple[int, int] = (0, 0),
+    ) -> dict:
+        """
+        多尺度模板匹配，提高不同分辨率下的识别率
+
+        Args:
+            template: 模板图像
+            target: 目标图像
+            cv_method: OpenCV匹配方法
+            template_scale_info: 模板缩放信息
+            target_scale_info: 目标缩放信息
+            region_offset: 区域偏移量
+
+        Returns:
+            匹配结果字典
+        """
+        best_confidence = 0
+        best_location = None
+        best_scale = 1.0
+
+        # 计算基础缩放比例
+        base_scale = 1.0
+        if template_scale_info and target_scale_info:
+            base_scale = self._calculate_optimal_scale(
+                template_scale_info, target_scale_info
+            )
+
+        # 定义多个缩放比例进行尝试
+        # 围绕基础缩放比例进行搜索，范围更广，步长更细
+        scale_factors = []
+
+        # 精细搜索范围：基础缩放的 0.5x 到 2.0x
+        min_scale = max(0.3, base_scale * 0.5)
+        max_scale = min(3.0, base_scale * 2.0)
+
+        # 生成多层次的缩放因子
+        # 第一层：粗略搜索
+        coarse_scales = np.arange(min_scale, max_scale + 0.1, 0.2)
+        # 第二层：围绕基础缩放的精细搜索
+        fine_scales = np.arange(
+            max(min_scale, base_scale - 0.3),
+            min(max_scale, base_scale + 0.3) + 0.05,
+            0.05,
+        )
+        # 第三层：非常精细的搜索（围绕基础缩放）
+        ultra_fine_scales = np.arange(
+            max(min_scale, base_scale - 0.1),
+            min(max_scale, base_scale + 0.1) + 0.02,
+            0.02,
+        )
+
+        # 合并并去重
+        all_scales = np.unique(
+            np.concatenate([coarse_scales, fine_scales, ultra_fine_scales])
+        )
+
+        # 确保包含基础缩放和1.0
+        if base_scale not in all_scales:
+            all_scales = np.append(all_scales, base_scale)
+        if 1.0 not in all_scales and min_scale <= 1.0 <= max_scale:
+            all_scales = np.append(all_scales, 1.0)
+
+        all_scales = np.sort(all_scales)
+
+        logger.debug(
+            f"多尺度匹配：基础缩放={base_scale:.3f}, 搜索范围=[{min_scale:.3f}, {max_scale:.3f}], 尺度数量={len(all_scales)}"
+        )
+
+        for scale in all_scales:
+            try:
+                # 缩放模板图像
+                if abs(scale - 1.0) < 0.001:  # 避免不必要的缩放
+                    scaled_template = template
+                else:
+                    new_height = int(template.shape[0] * scale)
+                    new_width = int(template.shape[1] * scale)
+
+                    if new_height <= 0 or new_width <= 0:
+                        continue
+
+                    scaled_template = cv2.resize(
+                        template, (new_width, new_height), interpolation=cv2.INTER_CUBIC
+                    )
+
+                # 确保模板不大于目标图像
+                if (
+                    scaled_template.shape[0] > target.shape[0]
+                    or scaled_template.shape[1] > target.shape[1]
+                ):
+                    continue
+
+                # 执行模板匹配
+                result = cv2.matchTemplate(target, scaled_template, cv_method)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 根据方法选择合适的值和位置
+                if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
+                    confidence = 1 - min_val
+                    match_loc = min_loc
+                else:
+                    confidence = max_val
+                    match_loc = max_loc
+
+                # 更新最佳匹配
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    h, w = scaled_template.shape[:2]
+                    location_x = match_loc[0] + region_offset[0]
+                    location_y = match_loc[1] + region_offset[1]
+                    best_location = (location_x, location_y, w, h)
+                    best_scale = scale
+
+                logger.debug(f"尺度 {scale:.3f}: 置信度 {confidence:.3f}")
+
+            except Exception as e:
+                logger.debug(f"尺度 {scale:.3f} 匹配失败: {e}")
+                continue
+
+        logger.debug(
+            f"多尺度匹配完成 - 最佳尺度: {best_scale:.3f}, 最佳置信度: {best_confidence:.3f}"
+        )
+
+        return {
+            "confidence": best_confidence,
+            "location": best_location,
+            "scale": best_scale,
+        }
+
+    def _single_scale_template_matching(
+        self,
+        template: np.ndarray,
+        target: np.ndarray,
+        cv_method: int,
+        scale: float,
+        region_offset: Tuple[int, int] = (0, 0),
+    ) -> dict:
+        """
+        单尺度模板匹配
+
+        Args:
+            template: 模板图像
+            target: 目标图像
+            cv_method: OpenCV匹配方法
+            scale: 缩放比例
+            region_offset: 区域偏移量
+
+        Returns:
+            匹配结果字典
+        """
+        best_confidence = 0
+        best_location = None
+
+        logger.debug(f"单尺度匹配，缩放: {scale:.3f}")
+
+        try:
+            # 缩放模板图像
+            if abs(scale - 1.0) < 0.001:
+                scaled_template = template
+            else:
+                scaled_template = cv2.resize(
+                    template,
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+
+            # 确保模板不大于目标图像
+            if (
+                scaled_template.shape[0] <= target.shape[0]
+                and scaled_template.shape[1] <= target.shape[1]
+            ):
+
+                # 执行模板匹配
+                result = cv2.matchTemplate(target, scaled_template, cv_method)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 根据方法选择合适的值和位置
+                if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
+                    best_confidence = 1 - min_val
+                    match_loc = min_loc
+                else:
+                    best_confidence = max_val
+                    match_loc = max_loc
+
+                # 记录匹配结果
+                h, w = scaled_template.shape[:2]
+                location_x = match_loc[0] + region_offset[0]
+                location_y = match_loc[1] + region_offset[1]
+                best_location = (location_x, location_y, w, h)
+
+                logger.debug(f"单尺度匹配 - 置信度: {best_confidence:.3f}")
+            else:
+                logger.warning(
+                    f"缩放后的模板图像 {scaled_template.shape[:2]} 大于目标图像 {target.shape[:2]}"
+                )
+
+        except Exception as e:
+            logger.error(f"单尺度匹配失败: {e}")
+
+        return {
+            "confidence": best_confidence,
+            "location": best_location,
+            "scale": scale,
+        }
+
+    def _feature_based_matching(
+        self,
+        template: np.ndarray,
+        target: np.ndarray,
+        region_offset: Tuple[int, int] = (0, 0),
+    ) -> dict:
+        """
+        基于特征点的图像匹配，对旋转和缩放更加鲁棒
+
+        Args:
+            template: 模板图像
+            target: 目标图像
+            region_offset: 区域偏移量
+
+        Returns:
+            匹配结果字典
+        """
+        try:
+            # 转换为灰度图像
+            template_gray = (
+                cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                if len(template.shape) == 3
+                else template
+            )
+            target_gray = (
+                cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
+                if len(target.shape) == 3
+                else target
+            )
+
+            # 使用SIFT特征检测器（如果可用）
+            try:
+                sift = cv2.SIFT_create()
+                detector = sift
+                detector_name = "SIFT"
+            except AttributeError:
+                # 如果SIFT不可用，使用ORB
+                orb = cv2.ORB_create(nfeatures=1000)
+                detector = orb
+                detector_name = "ORB"
+
+            # 检测关键点和描述符
+            kp1, des1 = detector.detectAndCompute(template_gray, None)
+            kp2, des2 = detector.detectAndCompute(target_gray, None)
+
+            if des1 is None or des2 is None or len(des1) < 4 or len(des2) < 4:
+                logger.debug("特征点不足，无法进行特征匹配")
+                return {"confidence": 0, "location": None, "scale": 1.0}
+
+            # 特征匹配
+            if detector_name == "SIFT":
+                # FLANN匹配器用于SIFT
+                FLANN_INDEX_KDTREE = 1
+                index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+                search_params = dict(checks=50)
+                flann = cv2.FlannBasedMatcher(index_params, search_params)
+                matches = flann.knnMatch(des1, des2, k=2)
+
+                # 应用Lowe's ratio test
+                good_matches = []
+                for match_pair in matches:
+                    if len(match_pair) == 2:
+                        m, n = match_pair
+                        if m.distance < 0.7 * n.distance:
+                            good_matches.append(m)
+            else:
+                # BF匹配器用于ORB
+                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                matches = bf.match(des1, des2)
+                good_matches = sorted(matches, key=lambda x: x.distance)[
+                    :50
+                ]  # 取前50个最佳匹配
+
+            if len(good_matches) < 4:
+                logger.debug(f"优质匹配点不足: {len(good_matches)}")
+                return {"confidence": 0, "location": None, "scale": 1.0}
+
+            # 提取匹配点坐标
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(
+                -1, 1, 2
+            )
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(
+                -1, 1, 2
+            )
+
+            # 使用RANSAC找到最佳的单应性矩阵
+            homography, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+            if homography is None:
+                logger.debug("无法计算单应性矩阵")
+                return {"confidence": 0, "location": None, "scale": 1.0}
+
+            # 计算模板四个角点在目标图像中的位置
+            h, w = template.shape[:2]
+            corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+            transformed_corners = cv2.perspectiveTransform(corners, homography)
+
+            # 计算边界框
+            x_coords = transformed_corners[:, 0, 0]
+            y_coords = transformed_corners[:, 0, 1]
+            min_x, max_x = int(np.min(x_coords)), int(np.max(x_coords))
+            min_y, max_y = int(np.min(y_coords)), int(np.max(y_coords))
+
+            # 添加区域偏移
+            min_x += region_offset[0]
+            min_y += region_offset[1]
+            max_x += region_offset[0]
+            max_y += region_offset[1]
+
+            width = max_x - min_x
+            height = max_y - min_y
+
+            # 计算置信度（基于内点比例和匹配质量）
+            inliers = np.sum(mask)
+            inlier_ratio = inliers / len(good_matches)
+            match_quality = len(good_matches) / max(len(kp1), len(kp2))
+            confidence = min(0.99, inlier_ratio * 0.7 + match_quality * 0.3)
+
+            # 计算缩放比例
+            original_area = w * h
+            transformed_area = width * height
+            scale = (
+                np.sqrt(transformed_area / original_area) if original_area > 0 else 1.0
+            )
+
+            logger.debug(
+                f"特征匹配 - 匹配点: {len(good_matches)}, 内点: {inliers}, 置信度: {confidence:.3f}"
+            )
+
+            return {
+                "confidence": confidence,
+                "location": (min_x, min_y, width, height),
+                "scale": scale,
+            }
+
+        except Exception as e:
+            logger.debug(f"特征匹配失败: {e}")
+            return {"confidence": 0, "location": None, "scale": 1.0}
+
+    def _hybrid_matching(
+        self,
+        template: np.ndarray,
+        target: np.ndarray,
+        cv_method: int,
+        template_scale_info: Optional[dict] = None,
+        target_scale_info: Optional[dict] = None,
+        region_offset: Tuple[int, int] = (0, 0),
+    ) -> dict:
+        """
+        混合匹配方法：结合模板匹配和特征匹配
+
+        Args:
+            template: 模板图像
+            target: 目标图像
+            cv_method: OpenCV匹配方法
+            template_scale_info: 模板缩放信息
+            target_scale_info: 目标缩放信息
+            region_offset: 区域偏移量
+
+        Returns:
+            匹配结果字典
+        """
+        # 执行多尺度模板匹配
+        template_result = self._multi_scale_template_matching(
+            template,
+            target,
+            cv_method,
+            template_scale_info,
+            target_scale_info,
+            region_offset,
+        )
+
+        # 执行特征匹配
+        feature_result = self._feature_based_matching(template, target, region_offset)
+
+        # 选择最佳结果
+        if template_result["confidence"] >= feature_result["confidence"]:
+            best_result = template_result.copy()
+            best_result["method_used"] = "template_matching"
+            logger.debug(
+                f"混合匹配：选择模板匹配结果 (置信度: {template_result['confidence']:.3f})"
+            )
+        else:
+            best_result = feature_result.copy()
+            best_result["method_used"] = "feature_matching"
+            logger.debug(
+                f"混合匹配：选择特征匹配结果 (置信度: {feature_result['confidence']:.3f})"
+            )
+
+        # 如果两种方法都有合理的结果，进行结果验证
+        if (
+            template_result["confidence"] > 0.3
+            and feature_result["confidence"] > 0.3
+            and template_result["location"]
+            and feature_result["location"]
+        ):
+
+            # 计算两个结果的重叠度
+            overlap = self._calculate_bbox_overlap(
+                template_result["location"], feature_result["location"]
+            )
+            if overlap > 0.5:  # 如果重叠度高，增加置信度
+                best_result["confidence"] = min(0.99, best_result["confidence"] * 1.1)
+                best_result["method_used"] = "hybrid_validated"
+                logger.debug(
+                    f"混合匹配：结果验证通过，置信度提升至 {best_result['confidence']:.3f}"
+                )
+
+        return best_result
+
+    def _calculate_bbox_overlap(
+        self, bbox1: Tuple[int, int, int, int], bbox2: Tuple[int, int, int, int]
+    ) -> float:
+        """
+        计算两个边界框的重叠比例
+
+        Args:
+            bbox1: 边界框1 (x, y, w, h)
+            bbox2: 边界框2 (x, y, w, h)
+
+        Returns:
+            重叠比例 (0-1)
+        """
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+
+        # 计算交集
+        left = max(x1, x2)
+        top = max(y1, y2)
+        right = min(x1 + w1, x2 + w2)
+        bottom = min(y1 + h1, y2 + h2)
+
+        if left < right and top < bottom:
+            intersection = (right - left) * (bottom - top)
+            union = w1 * h1 + w2 * h2 - intersection
+            return intersection / union if union > 0 else 0
+        return 0
+
     def _calculate_optimal_scale(
-        self, 
-        template_scale_info: dict, 
-        target_scale_info: dict
+        self, template_scale_info: dict, target_scale_info: dict
     ) -> float:
         """
         根据模板和目标图像的缩放信息计算最优缩放比例
-        
+
         Args:
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
-            
+
         Returns:
             计算出的最优缩放比例
         """
         try:
             # 获取DPI缩放比例
-            template_dpi = template_scale_info.get('dpi_scale', 1.0)
-            target_dpi = target_scale_info.get('dpi_scale', 1.0)
-            
+            template_dpi = template_scale_info.get("dpi_scale", 1.0)
+            target_dpi = target_scale_info.get("dpi_scale", 1.0)
+
             # 获取分辨率信息
-            template_res = template_scale_info.get('resolution', (1920, 1080))
-            target_res = target_scale_info.get('resolution', (1920, 1080))
-            
+            template_res = template_scale_info.get("resolution", (1920, 1080))
+            target_res = target_scale_info.get("resolution", (1920, 1080))
+
             # 计算DPI缩放比例
             dpi_scale_ratio = target_dpi / template_dpi
-            
+
             # 计算分辨率缩放比例（取平均值）
             res_scale_x = target_res[0] / template_res[0]
             res_scale_y = target_res[1] / template_res[1]
             res_scale_ratio = (res_scale_x + res_scale_y) / 2.0
-            
+
             # 综合缩放比例
             optimal_scale = dpi_scale_ratio * res_scale_ratio
-            
+
             # 限制缩放比例在合理范围内
             optimal_scale = max(0.3, min(3.0, optimal_scale))
-            
+
             logger.debug(
                 f"缩放计算: 模板DPI={template_dpi:.2f}, 目标DPI={target_dpi:.2f}, "
                 f"DPI比例={dpi_scale_ratio:.3f}, 分辨率比例={res_scale_ratio:.3f}, "
                 f"最终缩放={optimal_scale:.3f}"
             )
-            
+
             return optimal_scale
-            
+
         except Exception as e:
             logger.warning(f"计算最优缩放比例失败，使用默认值1.0: {e}")
             return 1.0
@@ -471,13 +1037,13 @@ class GuiAutoTool:
     def get_current_system_scale_info(self) -> dict:
         """
         获取当前系统的缩放信息，用作target_scale_info的默认值
-        
+
         Returns:
             当前系统缩放信息字典 {'dpi_scale': float, 'resolution': (w, h)}
         """
         return {
-            'dpi_scale': self.scale_info['dpi_scale'],
-            'resolution': self.scale_info['resolution']
+            "dpi_scale": self.scale_info["dpi_scale"],
+            "resolution": self.scale_info["resolution"],
         }
 
     def compare_images(
@@ -539,10 +1105,12 @@ class GuiAutoTool:
         region: Optional[Tuple[int, int, int, int]] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: bool = True,
+        enhancement_level: str = "adaptive",
     ) -> dict:
         """
         统一的图像匹配核心函数
-        
+
         Args:
             template: 模板图像路径或numpy数组
             target_image: 目标图像路径或numpy数组
@@ -551,7 +1119,7 @@ class GuiAutoTool:
             region: 搜索区域 (x, y, w, h) - 基准坐标
             template_scale_info: 模板图像的缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像的缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
-            
+
         Returns:
             包含匹配结果的字典: {
                 'confidence': float,    # 置信度
@@ -585,8 +1153,12 @@ class GuiAutoTool:
 
             # 图像预处理
             if enhance_images:
-                template_processed = self.preprocess_image(template_img, enhance=True)
-                target_processed = self.preprocess_image(target_img, enhance=True)
+                template_processed = self.preprocess_image(
+                    template_img, enhance=True, enhancement_level=enhancement_level
+                )
+                target_processed = self.preprocess_image(
+                    target_img, enhance=True, enhancement_level=enhancement_level
+                )
             else:
                 template_processed = template_img
                 target_processed = target_img
@@ -600,62 +1172,49 @@ class GuiAutoTool:
 
             cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
 
-            # 智能缩放逻辑：计算精确的缩放比例
-            if template_scale_info and target_scale_info:
-                scale = self._calculate_optimal_scale(template_scale_info, target_scale_info)
-                logger.info(f"智能缩放：计算出的精确缩放比例为 {scale:.3f}")
-            else:
-                scale = 1.0
-                logger.info("未提供缩放信息，使用默认缩放比例 1.0")
-
-            # 单次精确匹配
-            best_confidence = 0
-            best_location = None
-            best_scale = scale
-            best_match_loc = None
-
-            logger.debug(f"开始图像匹配，方法: {method}, 缩放: {scale:.3f}, 增强: {enhance_images}")
-            
-            # 缩放模板图像
-            if scale != 1.0:
-                scaled_template = cv2.resize(
+            # 执行匹配算法
+            if enhancement_level == "adaptive" and use_multi_scale:
+                # 自适应增强模式下使用混合匹配
+                match_result = self._hybrid_matching(
                     template_processed,
-                    None,
-                    fx=scale,
-                    fy=scale,
-                    interpolation=cv2.INTER_CUBIC,
+                    target_processed,
+                    cv_method,
+                    template_scale_info,
+                    target_scale_info,
+                    region_offset,
+                )
+            elif use_multi_scale:
+                # 多尺度模板匹配
+                match_result = self._multi_scale_template_matching(
+                    template_processed,
+                    target_processed,
+                    cv_method,
+                    template_scale_info,
+                    target_scale_info,
+                    region_offset,
                 )
             else:
-                scaled_template = template_processed
-
-            # 确保模板不大于目标图像
-            if (
-                scaled_template.shape[0] <= target_processed.shape[0]
-                and scaled_template.shape[1] <= target_processed.shape[1]
-            ):
-                # 执行模板匹配
-                result = cv2.matchTemplate(target_processed, scaled_template, cv_method)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-
-                # 根据方法选择合适的值和位置
-                if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
-                    best_confidence = 1 - min_val
-                    match_loc = min_loc
+                # 单尺度匹配
+                if template_scale_info and target_scale_info:
+                    scale = self._calculate_optimal_scale(
+                        template_scale_info, target_scale_info
+                    )
+                    logger.info(f"智能缩放：计算出的精确缩放比例为 {scale:.3f}")
                 else:
-                    best_confidence = max_val
-                    match_loc = max_loc
+                    scale = 1.0
+                    logger.info("未提供缩放信息，使用默认缩放比例 1.0")
 
-                logger.debug(f"缩放 {scale:.3f}, 置信度: {best_confidence:.3f}")
+                match_result = self._single_scale_template_matching(
+                    template_processed,
+                    target_processed,
+                    cv_method,
+                    scale,
+                    region_offset,
+                )
 
-                # 记录匹配结果
-                h, w = scaled_template.shape[:2]
-                # 计算在原始目标图像中的位置（加上region偏移）
-                location_x = match_loc[0] + region_offset[0]
-                location_y = match_loc[1] + region_offset[1]
-                best_location = (location_x, location_y, w, h)
-                best_match_loc = match_loc
-            else:
-                logger.warning(f"缩放后的模板图像 {scaled_template.shape[:2]} 大于目标图像 {target_processed.shape[:2]}")
+            best_confidence = match_result["confidence"]
+            best_location = match_result["location"]
+            best_scale = match_result["scale"]
 
             # 计算中心点
             best_center = None
@@ -669,7 +1228,7 @@ class GuiAutoTool:
             result_dict = {
                 "confidence": best_confidence,
                 "location": best_location,  # 基准坐标
-                "center": best_center,      # 基准中心点
+                "center": best_center,  # 基准中心点
                 "found": best_confidence >= self.confidence,
                 "method": method,
                 "scale": best_scale,
@@ -842,128 +1401,6 @@ class GuiAutoTool:
 
         return result_dict
 
-    def compare_multiple_methods(
-        self,
-        template_path: Union[str, Path, np.ndarray],
-        target_path: Union[str, Path, np.ndarray],
-        methods: list = None,
-        save_results: bool = False,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-    ) -> dict:
-        """
-        使用多种方法比较图片，返回最佳匹配结果
-
-        Args:
-            template_path: 模板图片路径或numpy数组
-            target_path: 目标图片路径或numpy数组
-            methods: 要尝试的匹配方法列表
-            save_results: 是否保存所有结果图片
-            max_retries: 最大重试次数（None时使用默认值）
-            retry_delay: 重试延迟时间（None时使用默认值）
-
-        Returns:
-            包含所有方法结果的字典
-        """
-        # 设置重试参数
-        if max_retries is None:
-            max_retries = self.default_max_retries
-        if retry_delay is None:
-            retry_delay = self.default_retry_delay
-
-        # 定义核心比较逻辑
-        def _compare_multiple_core():
-            return self._compare_multiple_methods_core(
-                template_path, target_path, methods, save_results
-            )
-
-        # 执行重试逻辑
-        current_delay = retry_delay
-        last_exception = None
-
-        for attempt in range(max_retries):
-            try:
-                result = _compare_multiple_core()
-                if attempt > 0:
-                    logger.info(
-                        f"compare_multiple_methods 在第 {attempt + 1} 次尝试成功"
-                    )
-                return result
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"compare_multiple_methods 第 {attempt + 1} 次尝试失败: {e}, {current_delay:.1f}秒后重试"
-                    )
-                    time.sleep(current_delay)
-                    current_delay *= 1.5  # 延迟递增
-                else:
-                    logger.error(
-                        f"compare_multiple_methods 所有 {max_retries} 次尝试均失败"
-                    )
-
-        raise last_exception
-
-    def _compare_multiple_methods_core(
-        self,
-        template_path: Union[str, Path, np.ndarray],
-        target_path: Union[str, Path, np.ndarray],
-        methods: list,
-        save_results: bool,
-    ) -> dict:
-        """
-        compare_multiple_methods 的核心实现逻辑
-        """
-        if methods is None:
-            methods = ["TM_CCOEFF_NORMED", "TM_CCORR_NORMED", "TM_SQDIFF_NORMED"]
-
-        results = {}
-        best_result = None
-        best_confidence = 0
-
-        logger.info(f"开始多方法比较，尝试方法: {methods}")
-
-        for method in methods:
-            try:
-                result_path = (
-                    f"result_{method}_{int(time.time())}.png" if save_results else None
-                )
-                result = self.compare_images(
-                    template_path,
-                    target_path,
-                    method=method,
-                    enhance_images=True,
-                    save_result=save_results,
-                    result_path=result_path,
-                )
-                results[method] = result
-
-                if result["confidence"] > best_confidence:
-                    best_confidence = result["confidence"]
-                    best_result = result.copy()
-                    best_result["best_method"] = method
-
-                logger.info(f"方法 {method}: 置信度 {result['confidence']:.3f}")
-
-            except Exception as e:
-                logger.error(f"方法 {method} 执行失败: {e}")
-                results[method] = {"error": str(e)}
-
-        results["best_result"] = best_result
-        results["summary"] = {
-            "best_method": best_result["best_method"] if best_result else None,
-            "best_confidence": best_confidence,
-            "methods_tried": len(
-                [
-                    r
-                    for r in results.values()
-                    if isinstance(r, dict) and "confidence" in r
-                ]
-            ),
-        }
-
-        return results
-
     def find_image_in_target(
         self,
         template: Union[str, Path, np.ndarray],
@@ -976,6 +1413,8 @@ class GuiAutoTool:
         retry_delay: Optional[float] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: bool = False,
+        enhancement_level: str = "adaptive",
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         在目标图像中查找模板图像
@@ -991,6 +1430,8 @@ class GuiAutoTool:
             retry_delay: 重试延迟时间（None时使用默认值）
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+            use_multi_scale: 是否使用多尺度匹配算法
+            enhancement_level: 图像增强级别 ("light", "standard", "aggressive", "adaptive")
 
         Returns:
             找到的图像位置 (left, top, width, height) 或 None
@@ -1005,11 +1446,25 @@ class GuiAutoTool:
         def _find_core():
             if try_multiple_methods:
                 return self._find_image_multiple_methods_core(
-                    template, target_image, region, template_scale_info, target_scale_info
+                    template,
+                    target_image,
+                    region,
+                    template_scale_info,
+                    target_scale_info,
+                    use_multi_scale,
+                    enhancement_level,
                 )
             else:
                 return self._find_image_in_target_core(
-                    template, target_image, region, method, enhance_images, template_scale_info, target_scale_info
+                    template,
+                    target_image,
+                    region,
+                    method,
+                    enhance_images,
+                    template_scale_info,
+                    target_scale_info,
+                    use_multi_scale,
+                    enhancement_level,
                 )
 
         # 执行重试逻辑
@@ -1048,6 +1503,8 @@ class GuiAutoTool:
         enhance_images: bool,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: bool = True,
+        enhancement_level: str = "adaptive",
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         find_image_in_target 的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1062,6 +1519,8 @@ class GuiAutoTool:
                 region=region,
                 template_scale_info=template_scale_info,
                 target_scale_info=target_scale_info,
+                use_multi_scale=use_multi_scale,
+                enhancement_level=enhancement_level,
             )
 
             # 检查匹配是否成功
@@ -1098,6 +1557,8 @@ class GuiAutoTool:
         region: Optional[Tuple[int, int, int, int]],
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        use_multi_scale: bool = True,
+        enhancement_level: str = "adaptive",
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         多方法图像匹配的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1124,12 +1585,14 @@ class GuiAutoTool:
                         region=region,
                         template_scale_info=template_scale_info,
                         target_scale_info=target_scale_info,
+                        use_multi_scale=use_multi_scale,
+                        enhancement_level=enhancement_level if enhance else "light",
                     )
 
                     if match_result["found"]:
                         result = match_result["location"]
                         confidence = match_result["confidence"]
-                        
+
                         # 使用实际置信度进行比较，同时考虑方法优先级
                         # 优先级：CCOEFF_NORMED > CCORR_NORMED，增强 > 不增强
                         priority_bonus = 0
@@ -1137,7 +1600,7 @@ class GuiAutoTool:
                             priority_bonus += 0.1
                         if enhance:
                             priority_bonus += 0.05
-                            
+
                         adjusted_confidence = confidence + priority_bonus
 
                         if adjusted_confidence > best_confidence or best_result is None:
@@ -1167,31 +1630,6 @@ class GuiAutoTool:
 
         return best_result
 
-    def find_template_in_target(
-        self,
-        template: Union[str, Path, np.ndarray],
-        target_image: Union[str, Path, np.ndarray],
-        region: Optional[Tuple[int, int, int, int]] = None,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """
-        在目标图像中查找模板（简化版本）
-
-        Args:
-            template: 模板图像路径或numpy数组
-            target_image: 目标图像路径或numpy数组
-            region: 搜索区域
-
-        Returns:
-            图像位置 (left, top, width, height) 或 None
-        """
-        # 根据设置选择匹配方法
-        return self.find_image_in_target(
-            template,
-            target_image,
-            region=region,
-            method=self.default_method,
-        )
-
     def get_image_center(self, location: Tuple[int, int, int, int]) -> Tuple[int, int]:
         """
         获取图像中心点坐标
@@ -1206,8 +1644,6 @@ class GuiAutoTool:
         center_x = left + width // 2
         center_y = top + height // 2
         return (center_x, center_y)
-
-    
 
     @retry(max_attempts=3, delay=0.3)
     def click_image(
@@ -1233,7 +1669,9 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.find_template_in_target(template, target_image, region=region)
+            base_location = self.find_image_in_target(
+                template, target_image, region=region
+            )
             logger.info(base_location)
             if not base_location:
                 logger.error("点击失败：未找到目标图像")
@@ -1283,7 +1721,9 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.find_template_in_target(template, target_image, region=region)
+            base_location = self.find_image_in_target(
+                template, target_image, region=region
+            )
             if not base_location:
                 logger.error("双击失败：未找到目标图像")
                 return False
@@ -1332,7 +1772,9 @@ class GuiAutoTool:
         """
         try:
             # 找到起始位置（基准坐标）
-            from_base_location = self.find_template_in_target(from_template, target_image)
+            from_base_location = self.find_image_in_target(
+                from_template, target_image
+            )
             if not from_base_location:
                 logger.error("拖拽失败：未找到起始图像")
                 return False
@@ -1340,7 +1782,7 @@ class GuiAutoTool:
             from_base_x, from_base_y = self.get_image_center(from_base_location)
 
             # 找到目标位置（基准坐标）
-            to_base_location = self.find_template_in_target(to_template, target_image)
+            to_base_location = self.find_image_in_target(to_template, target_image)
             if not to_base_location:
                 logger.error("拖拽失败：未找到目标图像")
                 return False
@@ -1421,7 +1863,7 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.find_template_in_target(template, target_image)
+            base_location = self.find_image_in_target(template, target_image)
             if not base_location:
                 logger.error("鼠标移动失败：未找到目标图像")
                 return False
@@ -1447,5 +1889,3 @@ class GuiAutoTool:
         except Exception as e:
             logger.error(f"鼠标移动失败：{e}")
             return False
-
-
