@@ -7,7 +7,6 @@ import time
 import functools
 import logging
 import ctypes
-import ctypes.wintypes
 from typing import Optional, Tuple, Union, Callable, Any
 from pathlib import Path
 
@@ -74,17 +73,30 @@ class SystemInfo:
             return SystemInfo.BASE_RESOLUTION
 
     @staticmethod
-    def get_scale_factors() -> dict:
+    def get_scale_factors(
+        base_scale: Optional[float] = None,
+        base_resolution: Optional[Tuple[int, int]] = None,
+    ) -> dict:
         """获取相对于基准配置的缩放因子"""
         current_scale = SystemInfo.get_dpi_scale()
         current_resolution = SystemInfo.get_screen_resolution()
 
+        # 使用自定义基准值或默认值
+        effective_base_scale = (
+            base_scale if base_scale is not None else SystemInfo.BASE_SCALE
+        )
+        effective_base_resolution = (
+            base_resolution
+            if base_resolution is not None
+            else SystemInfo.BASE_RESOLUTION
+        )
+
         # 计算相对于基准的缩放因子
-        dpi_factor = current_scale / SystemInfo.BASE_SCALE
+        dpi_factor = current_scale / effective_base_scale
 
         # 计算分辨率缩放因子
-        res_factor_x = current_resolution[0] / SystemInfo.BASE_RESOLUTION[0]
-        res_factor_y = current_resolution[1] / SystemInfo.BASE_RESOLUTION[1]
+        res_factor_x = current_resolution[0] / effective_base_resolution[0]
+        res_factor_y = current_resolution[1] / effective_base_resolution[1]
         res_factor = (res_factor_x + res_factor_y) / 2.0
 
         # 综合缩放因子
@@ -96,8 +108,8 @@ class SystemInfo:
             "dpi_factor": dpi_factor,
             "resolution_factor": res_factor,
             "combined_factor": combined_factor,
-            "base_scale": SystemInfo.BASE_SCALE,
-            "base_resolution": SystemInfo.BASE_RESOLUTION,
+            "base_scale": effective_base_scale,
+            "base_resolution": effective_base_resolution,
         }
 
 
@@ -157,6 +169,8 @@ class GuiAutoTool:
         auto_scale: bool = True,
         default_max_retries: int = 3,
         default_retry_delay: float = 0.5,
+        base_scale: Optional[float] = None,
+        base_resolution: Optional[Tuple[int, int]] = None,
     ):
         """
         初始化GUI自动化工具
@@ -169,6 +183,8 @@ class GuiAutoTool:
             auto_scale: 是否自动处理DPI和分辨率缩放
             default_max_retries: 默认最大重试次数
             default_retry_delay: 默认重试延迟时间（秒）
+            base_scale: 自定义基准DPI缩放，不指定则使用默认值1.0
+            base_resolution: 自定义基准分辨率，不指定则使用默认值(1920, 1080)
         """
         self.confidence = confidence
         self.timeout = timeout
@@ -178,11 +194,19 @@ class GuiAutoTool:
         self.default_max_retries = default_max_retries
         self.default_retry_delay = default_retry_delay
 
-        # 获取系统缩放信息
-        self.scale_info = SystemInfo.get_scale_factors()
+        # 保存自定义基准值
+        self.base_scale = base_scale
+        self.base_resolution = base_resolution
+
+        # 获取系统缩放信息（使用自定义基准值）
+        self.scale_info = SystemInfo.get_scale_factors(
+            base_scale=self.base_scale, base_resolution=self.base_resolution
+        )
         logger.info(
             f"系统信息: DPI缩放={self.scale_info['dpi_scale']:.2f}, "
             f"分辨率={self.scale_info['resolution']}, "
+            f"基准缩放={self.scale_info['base_scale']:.2f}, "
+            f"基准分辨率={self.scale_info['base_resolution']}, "
             f"综合缩放因子={self.scale_info['combined_factor']:.2f}"
         )
 
@@ -347,6 +371,25 @@ class GuiAutoTool:
 
         return template
 
+    def load_image(self, image_input: Union[str, Path, np.ndarray]) -> np.ndarray:
+        """
+        加载图像，支持路径或numpy数组输入
+
+        Args:
+            image_input: 图像路径或numpy数组
+
+        Returns:
+            图像的numpy数组
+        """
+        if isinstance(image_input, np.ndarray):
+            # 验证是否为有效的图像数组
+            if len(image_input.shape) not in [2, 3]:
+                raise ValueError(f"无效的图像数组形状: {image_input.shape}")
+            return image_input
+        else:
+            # 使用现有的 load_template 方法加载文件
+            return self.load_template(image_input)
+
     def preprocess_image(self, image: np.ndarray, enhance: bool = True) -> np.ndarray:
         """
         图像预处理以提高匹配精度
@@ -380,30 +423,26 @@ class GuiAutoTool:
 
     def compare_images(
         self,
-        template_path: Union[str, Path],
-        target_path: Union[str, Path],
+        template_path: Union[str, Path, np.ndarray],
+        target_path: Union[str, Path, np.ndarray],
         method: str = "TM_CCOEFF_NORMED",
         multi_scale: bool = True,
         enhance_images: bool = True,
         save_result: bool = False,
         result_path: Optional[str] = None,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
         return_system_coordinates: bool = False,
     ) -> dict:
         """
         比较两张图片，返回匹配结果
 
         Args:
-            template_path: 模板图片路径
-            target_path: 目标图片路径
+            template_path: 模板图片路径或numpy数组
+            target_path: 目标图片路径或numpy数组
             method: 匹配方法
             multi_scale: 是否使用多尺度匹配
             enhance_images: 是否进行图像增强
             save_result: 是否保存标注结果图片
             result_path: 结果图片保存路径
-            max_retries: 最大重试次数（None时使用默认值）
-            retry_delay: 重试延迟时间（None时使用默认值）
             return_system_coordinates: 是否返回系统坐标（默认返回基准坐标）
 
         Returns:
@@ -417,52 +456,22 @@ class GuiAutoTool:
                 'result_image_path': str  # 结果图片路径（如果保存）
             }
         """
-        # 设置重试参数
-        if max_retries is None:
-            max_retries = self.default_max_retries
-        if retry_delay is None:
-            retry_delay = self.default_retry_delay
-
         # 定义核心比较逻辑
-        def _compare_core():
-            return self._compare_images_core(
-                template_path,
-                target_path,
-                method,
-                multi_scale,
-                enhance_images,
-                save_result,
-                result_path,
-                return_system_coordinates,
-            )
-
-        # 执行重试逻辑
-        current_delay = retry_delay
-        last_exception = None
-
-        for attempt in range(max_retries):
-            try:
-                result = _compare_core()
-                if attempt > 0:
-                    logger.info(f"compare_images 在第 {attempt + 1} 次尝试成功")
-                return result
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"compare_images 第 {attempt + 1} 次尝试失败: {e}, {current_delay:.1f}秒后重试"
-                    )
-                    time.sleep(current_delay)
-                    current_delay *= 1.5  # 延迟递增
-                else:
-                    logger.error(f"compare_images 所有 {max_retries} 次尝试均失败")
-
-        raise last_exception
+        return self._compare_images_core(
+            template_path,
+            target_path,
+            method,
+            multi_scale,
+            enhance_images,
+            save_result,
+            result_path,
+            return_system_coordinates,
+        )
 
     def _compare_images_core(
         self,
-        template_path: Union[str, Path],
-        target_path: Union[str, Path],
+        template_path: Union[str, Path, np.ndarray],
+        target_path: Union[str, Path, np.ndarray],
         method: str,
         multi_scale: bool,
         enhance_images: bool,
@@ -474,8 +483,8 @@ class GuiAutoTool:
         compare_images 的核心实现逻辑
         """
         # 加载图像
-        template = self.load_template(template_path)
-        target = self.load_template(target_path)
+        template = self.load_image(template_path)
+        target = self.load_image(target_path)
 
         if template is None or target is None:
             raise ValueError("无法加载图片文件")
@@ -571,7 +580,7 @@ class GuiAutoTool:
                 base_location[0] + base_location[2] // 2,
                 base_location[1] + base_location[3] // 2,
             )
-            
+
             # 如果需要系统坐标，进行转换
             if return_system_coordinates:
                 system_location = self.adjust_coordinates_to_scale(base_location)
@@ -581,7 +590,9 @@ class GuiAutoTool:
                 )
 
         # 根据参数决定返回的坐标类型
-        output_location = system_location if return_system_coordinates else base_location
+        output_location = (
+            system_location if return_system_coordinates else base_location
+        )
         output_center = system_center if return_system_coordinates else base_center
 
         # 准备返回结果
@@ -607,15 +618,28 @@ class GuiAutoTool:
             if result_path is None:
                 result_path = f"match_result_{int(time.time())}.png"
 
-            # 重新加载原始目标图像用于绘制（不进行基准转换）
-            original_target = self.load_template(target_path)
+            # 获取原始目标图像用于绘制（不进行基准转换）
+            if isinstance(target_path, np.ndarray):
+                # 如果输入是numpy数组，直接使用
+                original_target = target_path.copy()
+            else:
+                # 如果输入是路径，重新加载原始图像
+                original_target = self.load_template(target_path)
             result_image = original_target.copy()
 
             # 使用系统坐标进行绘制
-            draw_location = system_location if system_location else self.adjust_coordinates_to_scale(base_location)
-            draw_center = system_center if system_center else (
-                draw_location[0] + draw_location[2] // 2,
-                draw_location[1] + draw_location[3] // 2,
+            draw_location = (
+                system_location
+                if system_location
+                else self.adjust_coordinates_to_scale(base_location)
+            )
+            draw_center = (
+                system_center
+                if system_center
+                else (
+                    draw_location[0] + draw_location[2] // 2,
+                    draw_location[1] + draw_location[3] // 2,
+                )
             )
 
             # 绘制匹配框（使用系统坐标）
@@ -664,8 +688,8 @@ class GuiAutoTool:
 
     def compare_multiple_methods(
         self,
-        template_path: Union[str, Path],
-        target_path: Union[str, Path],
+        template_path: Union[str, Path, np.ndarray],
+        target_path: Union[str, Path, np.ndarray],
         methods: list = None,
         save_results: bool = False,
         max_retries: Optional[int] = None,
@@ -675,8 +699,8 @@ class GuiAutoTool:
         使用多种方法比较图片，返回最佳匹配结果
 
         Args:
-            template_path: 模板图片路径
-            target_path: 目标图片路径
+            template_path: 模板图片路径或numpy数组
+            target_path: 目标图片路径或numpy数组
             methods: 要尝试的匹配方法列表
             save_results: 是否保存所有结果图片
             max_retries: 最大重试次数（None时使用默认值）
@@ -726,8 +750,8 @@ class GuiAutoTool:
 
     def _compare_multiple_methods_core(
         self,
-        template_path: Union[str, Path],
-        target_path: Union[str, Path],
+        template_path: Union[str, Path, np.ndarray],
+        target_path: Union[str, Path, np.ndarray],
         methods: list,
         save_results: bool,
     ) -> dict:
@@ -793,6 +817,7 @@ class GuiAutoTool:
         method: str = "TM_CCOEFF_NORMED",
         multi_scale: bool = True,
         enhance_images: bool = True,
+        try_multiple_methods: bool = False,
         max_retries: Optional[int] = None,
         retry_delay: Optional[float] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
@@ -806,6 +831,7 @@ class GuiAutoTool:
             method: 匹配方法 ("TM_CCOEFF_NORMED", "TM_CCORR_NORMED", "TM_SQDIFF_NORMED")
             multi_scale: 是否使用多尺度匹配
             enhance_images: 是否进行图像增强处理
+            try_multiple_methods: 是否尝试多种方法和参数组合（高级匹配）
             max_retries: 最大重试次数（None时使用默认值）
             retry_delay: 重试延迟时间（None时使用默认值）
 
@@ -820,9 +846,14 @@ class GuiAutoTool:
 
         # 定义核心查找逻辑
         def _find_core():
-            return self._find_image_in_target_core(
-                template, target_image, region, method, multi_scale, enhance_images
-            )
+            if try_multiple_methods:
+                return self._find_image_multiple_methods_core(
+                    template, target_image, region, multi_scale
+                )
+            else:
+                return self._find_image_in_target_core(
+                    template, target_image, region, method, multi_scale, enhance_images
+                )
 
         # 执行重试逻辑
         current_delay = retry_delay
@@ -849,7 +880,7 @@ class GuiAutoTool:
 
         # 如果所有重试都失败了，可以选择抛出异常或返回None
         # 这里选择返回None，保持原有行为
-        return None
+        return last_exception
 
     def _find_image_in_target_core(
         self,
@@ -947,6 +978,7 @@ class GuiAutoTool:
                 best_confidence = confidence
                 h, w = scaled_template.shape[:2]
                 left, top = match_loc
+                best_location = (left, top, w, h)
 
             # 如果指定了搜索区域，需要调整坐标
             if region:
@@ -966,157 +998,71 @@ class GuiAutoTool:
             )
             return best_location
 
+        print(f"未找到图像，最高置信度: {best_confidence:.3f}")
         logger.debug(f"未找到图像，最高置信度: {best_confidence:.3f}")
+        # exit()
         return None
 
-    def find_image_advanced_in_target(
-        self,
-        template: Union[str, Path, np.ndarray],
-        target_image: Union[str, Path, np.ndarray],
-        region: Optional[Tuple[int, int, int, int]] = None,
-        try_multiple_methods: bool = True,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """
-        高级图像匹配，在目标图像中尝试多种方法和参数组合
-
-        Args:
-            template: 模板图像路径或numpy数组
-            target_image: 目标图像路径或numpy数组
-            region: 搜索区域
-            try_multiple_methods: 是否尝试多种匹配方法
-            max_retries: 最大重试次数（None时使用默认值）
-            retry_delay: 重试延迟时间（None时使用默认值）
-
-        Returns:
-            找到的图像位置 (left, top, width, height) 或 None
-        """
-        # 设置重试参数
-        if max_retries is None:
-            max_retries = self.default_max_retries
-        if retry_delay is None:
-            retry_delay = self.default_retry_delay
-
-        # 定义核心查找逻辑
-        def _find_advanced_core():
-            return self._find_image_advanced_in_target_core(
-                template, target_image, region, try_multiple_methods
-            )
-
-        # 执行重试逻辑
-        current_delay = retry_delay
-        last_exception = None
-
-        for attempt in range(max_retries):
-            try:
-                result = _find_advanced_core()
-                if attempt > 0 and result is not None:
-                    logger.info(
-                        f"find_image_advanced_in_target 在第 {attempt + 1} 次尝试成功"
-                    )
-                return result
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"find_image_advanced_in_target 第 {attempt + 1} 次尝试失败: {e}, {current_delay:.1f}秒后重试"
-                    )
-                    time.sleep(current_delay)
-                    current_delay *= 1.5  # 延迟递增
-                else:
-                    logger.error(
-                        f"find_image_advanced_in_target 所有 {max_retries} 次尝试均失败"
-                    )
-
-        # 如果所有重试都失败了，返回None保持原有行为
-        return None
-
-    def _find_image_advanced_in_target_core(
+    def _find_image_multiple_methods_core(
         self,
         template: Union[str, Path, np.ndarray],
         target_image: Union[str, Path, np.ndarray],
         region: Optional[Tuple[int, int, int, int]],
-        try_multiple_methods: bool,
+        multi_scale: bool,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
-        find_image_advanced_in_target 的核心实现逻辑
+        多方法图像匹配的核心实现逻辑
         """
-        methods_to_try = (
-            ["TM_CCOEFF_NORMED", "TM_CCORR_NORMED"]
-            if try_multiple_methods
-            else ["TM_CCOEFF_NORMED"]
-        )
+        methods_to_try = ["TM_CCOEFF_NORMED", "TM_CCORR_NORMED"]
         enhancement_options = [True, False]
 
         best_result = None
         best_confidence = 0
+        best_method = None
+        best_enhance = None
+
+        logger.debug("开始多方法匹配尝试")
 
         for method in methods_to_try:
             for enhance in enhancement_options:
                 try:
-                    result = self.find_image_in_target(
-                        template,
-                        target_image,
-                        region=region,
-                        method=method,
-                        multi_scale=True,
-                        enhance_images=enhance,
+                    result = self._find_image_in_target_core(
+                        template, target_image, region, method, multi_scale, enhance
                     )
 
                     if result:
-                        # 重新计算置信度以比较不同方法的结果
-                        if isinstance(target_image, (str, Path)):
-                            target_img = self.load_template(target_image)
-                        else:
-                            target_img = target_image
-
-                        if isinstance(template, (str, Path)):
-                            template_img = self.load_template(template)
-                        else:
-                            template_img = template
-
+                        # 简单使用匹配成功作为判断标准，避免重新计算置信度的复杂逻辑
+                        # 优先级：CCOEFF_NORMED > CCORR_NORMED，增强 > 不增强
+                        priority_score = 0
+                        if method == "TM_CCOEFF_NORMED":
+                            priority_score += 2
                         if enhance:
-                            target_img = self.preprocess_image(target_img, enhance=True)
-                            template_img = self.preprocess_image(
-                                template_img, enhance=True
+                            priority_score += 1
+
+                        if priority_score > best_confidence or best_result is None:
+                            best_confidence = priority_score
+                            best_result = result
+                            best_method = method
+                            best_enhance = enhance
+                            logger.debug(
+                                f"找到匹配 - 方法: {method}, 增强: {enhance}, 位置: {result}"
                             )
 
-                        # 使用结果位置计算置信度
-                        left, top, w, h = result
-                        if region:
-                            left -= region[0]
-                            top -= region[1]
-
-                        roi = target_img[top : top + h, left : left + w]
-                        if roi.shape[:2] == template_img.shape[:2]:
-                            # 计算结构相似性
-                            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                            template_gray = cv2.cvtColor(
-                                template_img, cv2.COLOR_BGR2GRAY
+                        # 如果用最优配置找到了结果，直接返回
+                        if method == "TM_CCOEFF_NORMED" and enhance:
+                            logger.info(
+                                f"使用最优配置找到匹配: {method}, 增强: {enhance}"
                             )
-
-                            # 使用归一化互相关计算相似度
-                            match_result = cv2.matchTemplate(
-                                roi_gray.reshape(1, -1),
-                                template_gray.reshape(1, -1),
-                                cv2.TM_CCOEFF_NORMED,
-                            )
-                            confidence = float(match_result[0, 0])
-
-                            if confidence > best_confidence:
-                                best_confidence = confidence
-                                best_result = result
-                                logger.debug(
-                                    f"找到更好匹配 - 方法: {method}, 增强: {enhance}, 置信度: {confidence:.3f}"
-                                )
+                            return result
 
                 except Exception as e:
                     logger.debug(f"方法 {method} (增强={enhance}) 失败: {e}")
                     continue
 
         if best_result:
-            logger.info(f"高级匹配成功，最终置信度: {best_confidence:.3f}")
+            logger.info(
+                f"多方法匹配成功 - 最佳方法: {best_method}, 增强: {best_enhance}"
+            )
 
         return best_result
 
@@ -1138,12 +1084,12 @@ class GuiAutoTool:
             图像位置 (left, top, width, height) 或 None
         """
         # 根据设置选择匹配方法
-        if self.use_advanced_matching:
-            return self.find_image_advanced_in_target(template, target_image, region)
-        else:
-            return self.find_image_in_target(
-                template, target_image, region, method=self.default_method
-            )
+        return self.find_image_in_target(
+            template,
+            target_image,
+            region=region,
+            method=self.default_method,
+        )
 
     def get_image_center(self, location: Tuple[int, int, int, int]) -> Tuple[int, int]:
         """
@@ -1160,72 +1106,7 @@ class GuiAutoTool:
         center_y = top + height // 2
         return (center_x, center_y)
 
-    def wait_for_image(
-        self,
-        template: Union[str, Path, np.ndarray],
-        target_image: Union[str, Path, np.ndarray],
-        region: Optional[Tuple[int, int, int, int]] = None,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """
-        在目标图像中等待/查找模板图像
-
-        Args:
-            template: 模板图像路径或numpy数组
-            target_image: 目标图像路径或numpy数组
-            region: 搜索区域
-            max_retries: 最大重试次数（None时使用默认值）
-            retry_delay: 重试延迟时间（None时使用默认值）
-
-        Returns:
-            找到的图像位置 (left, top, width, height) 或 None
-        """
-        if max_retries is None:
-            max_retries = self.default_max_retries
-        if retry_delay is None:
-            retry_delay = self.default_retry_delay
-
-        # 执行重试逻辑
-        current_delay = retry_delay
-        last_exception = None
-
-        for attempt in range(max_retries):
-            try:
-                # 使用现有的图像查找方法
-                location = self.find_image_in_target(
-                    template,
-                    target_image,
-                    region=region,
-                    max_retries=1,  # 内部不再重试，由外层控制
-                    retry_delay=0,
-                )
-                if location:
-                    if attempt > 0:
-                        logger.info(f"wait_for_image 在第 {attempt + 1} 次尝试成功")
-                    return location
-                else:
-                    # 如果没找到，不抛异常，继续重试
-                    if attempt < max_retries - 1:
-                        logger.debug(
-                            f"wait_for_image 第 {attempt + 1} 次尝试未找到图像，{current_delay:.1f}秒后重试"
-                        )
-                        time.sleep(current_delay)
-                        current_delay *= 1.5  # 延迟递增
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"wait_for_image 第 {attempt + 1} 次尝试失败: {e}, {current_delay:.1f}秒后重试"
-                    )
-                    time.sleep(current_delay)
-                    current_delay *= 1.5  # 延迟递增
-                else:
-                    logger.error(f"wait_for_image 所有 {max_retries} 次尝试均失败")
-
-        # 如果所有重试都失败了，返回None
-        logger.debug(f"wait_for_image 在 {max_retries} 次尝试后仍未找到图像")
-        return None
+    
 
     @retry(max_attempts=3, delay=0.3)
     def click_image(
@@ -1251,11 +1132,12 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.wait_for_image(template, target_image, region=region)
+            base_location = self.find_template_in_target(template, target_image, region=region)
+            logger.info(base_location)
             if not base_location:
                 logger.error("点击失败：未找到目标图像")
                 return False
-                
+
             # 计算基准中心点
             base_center_x, base_center_y = self.get_image_center(base_location)
 
@@ -1264,11 +1146,15 @@ class GuiAutoTool:
             base_click_y = base_center_y + offset[1]
 
             # 转换为系统坐标进行实际点击
-            system_location = self.adjust_coordinates_to_scale((base_click_x, base_click_y, 1, 1))
+            system_location = self.adjust_coordinates_to_scale(
+                (base_click_x, base_click_y, 1, 1)
+            )
             click_x, click_y = system_location[0], system_location[1]
 
             pyautogui.click(click_x, click_y, button=button)
-            logger.info(f"点击图像成功，基准位置: ({base_click_x}, {base_click_y}), 系统位置: ({click_x}, {click_y})")
+            logger.info(
+                f"点击图像成功，基准位置: ({base_click_x}, {base_click_y}), 系统位置: ({click_x}, {click_y})"
+            )
             return True
         except Exception as e:
             logger.error(f"点击失败：{e}")
@@ -1296,11 +1182,11 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.wait_for_image(template, target_image, region=region)
+            base_location = self.find_template_in_target(template, target_image, region=region)
             if not base_location:
                 logger.error("双击失败：未找到目标图像")
                 return False
-                
+
             # 计算基准中心点
             base_center_x, base_center_y = self.get_image_center(base_location)
 
@@ -1309,11 +1195,15 @@ class GuiAutoTool:
             base_click_y = base_center_y + offset[1]
 
             # 转换为系统坐标进行实际双击
-            system_location = self.adjust_coordinates_to_scale((base_click_x, base_click_y, 1, 1))
+            system_location = self.adjust_coordinates_to_scale(
+                (base_click_x, base_click_y, 1, 1)
+            )
             click_x, click_y = system_location[0], system_location[1]
 
             pyautogui.doubleClick(click_x, click_y)
-            logger.info(f"双击图像成功，基准位置: ({base_click_x}, {base_click_y}), 系统位置: ({click_x}, {click_y})")
+            logger.info(
+                f"双击图像成功，基准位置: ({base_click_x}, {base_click_y}), 系统位置: ({click_x}, {click_y})"
+            )
             return True
         except Exception as e:
             logger.error(f"双击失败：{e}")
@@ -1341,25 +1231,27 @@ class GuiAutoTool:
         """
         try:
             # 找到起始位置（基准坐标）
-            from_base_location = self.wait_for_image(from_template, target_image)
+            from_base_location = self.find_template_in_target(from_template, target_image)
             if not from_base_location:
                 logger.error("拖拽失败：未找到起始图像")
                 return False
-                
+
             from_base_x, from_base_y = self.get_image_center(from_base_location)
 
             # 找到目标位置（基准坐标）
-            to_base_location = self.wait_for_image(to_template, target_image)
+            to_base_location = self.find_template_in_target(to_template, target_image)
             if not to_base_location:
                 logger.error("拖拽失败：未找到目标图像")
                 return False
-                
+
             to_base_x, to_base_y = self.get_image_center(to_base_location)
 
             # 转换为系统坐标进行实际拖拽
-            from_system = self.adjust_coordinates_to_scale((from_base_x, from_base_y, 1, 1))
+            from_system = self.adjust_coordinates_to_scale(
+                (from_base_x, from_base_y, 1, 1)
+            )
             to_system = self.adjust_coordinates_to_scale((to_base_x, to_base_y, 1, 1))
-            
+
             from_x, from_y = from_system[0], from_system[1]
             to_x, to_y = to_system[0], to_system[1]
 
@@ -1367,7 +1259,9 @@ class GuiAutoTool:
             pyautogui.drag(
                 to_x - from_x, to_y - from_y, duration=duration, button="left"
             )
-            logger.info(f"拖拽成功：基准坐标从 ({from_base_x}, {from_base_y}) 到 ({to_base_x}, {to_base_y})")
+            logger.info(
+                f"拖拽成功：基准坐标从 ({from_base_x}, {from_base_y}) 到 ({to_base_x}, {to_base_y})"
+            )
             logger.info(f"         系统坐标从 ({from_x}, {from_y}) 到 ({to_x}, {to_y})")
             return True
         except Exception as e:
@@ -1426,11 +1320,11 @@ class GuiAutoTool:
         """
         try:
             # 获取基准坐标位置
-            base_location = self.wait_for_image(template, target_image)
+            base_location = self.find_template_in_target(template, target_image)
             if not base_location:
                 logger.error("鼠标移动失败：未找到目标图像")
                 return False
-                
+
             # 计算基准中心点
             base_center_x, base_center_y = self.get_image_center(base_location)
 
@@ -1439,11 +1333,15 @@ class GuiAutoTool:
             base_move_y = base_center_y + offset[1]
 
             # 转换为系统坐标进行实际移动
-            system_location = self.adjust_coordinates_to_scale((base_move_x, base_move_y, 1, 1))
+            system_location = self.adjust_coordinates_to_scale(
+                (base_move_x, base_move_y, 1, 1)
+            )
             move_x, move_y = system_location[0], system_location[1]
 
             pyautogui.moveTo(move_x, move_y, duration=duration)
-            logger.info(f"鼠标移动成功，基准位置: ({base_move_x}, {base_move_y}), 系统位置: ({move_x}, {move_y})")
+            logger.info(
+                f"鼠标移动成功，基准位置: ({base_move_x}, {base_move_y}), 系统位置: ({move_x}, {move_y})"
+            )
             return True
         except Exception as e:
             logger.error(f"鼠标移动失败：{e}")
@@ -1504,11 +1402,15 @@ def main():
 
             print(f"   置信度: {result['confidence']:.3f}")
             print(f"   坐标类型: {result['coordinate_type']}")
-            print(f"   返回坐标: {result['location']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})")
-            print(f"   返回中心点: {result['center']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})")
+            print(
+                f"   返回坐标: {result['location']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})"
+            )
+            print(
+                f"   返回中心点: {result['center']} ({'基准' if result['coordinate_type'] == 'base' else '系统'})"
+            )
             print(f"   基准坐标: {result['base_location']}")
             print(f"   基准中心点: {result['base_center']}")
-            if result['system_location']:
+            if result["system_location"]:
                 print(f"   系统坐标: {result['system_location']}")
                 print(f"   系统中心点: {result['system_center']}")
             print(f"   是否找到: {result['found']}")
@@ -1521,7 +1423,7 @@ def main():
             print(f"   DPI缩放: {result['system_info']['dpi_scale']:.2f}")
             if result["result_image_path"]:
                 print(f"   结果图片: {result['result_image_path']}")
-            
+
             # 演示返回系统坐标的情况
             print("\n   演示返回系统坐标:")
             result_sys = gui_tool.compare_images(
@@ -1529,7 +1431,7 @@ def main():
                 target_path=target_path,
                 method="TM_CCOEFF_NORMED",
                 return_system_coordinates=True,
-                max_retries=1
+                max_retries=1,
             )
             print(f"   系统坐标模式 - 返回坐标: {result_sys['location']}")
             print(f"   系统坐标模式 - 返回中心点: {result_sys['center']}")
@@ -1549,6 +1451,7 @@ def main():
             )
 
             import rich
+
             rich.print(results)
             # print(results)
             # print("   各方法结果:")
