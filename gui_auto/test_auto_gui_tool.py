@@ -29,30 +29,30 @@ def main():
     #     enhancement_level="standard",
     # )
 
-    t1 = tool.compare_images(
-        template_path=template_path,
-        target_path=target_path,
-        save_result=True,
-        result_path="image/compare_images_result.png",
-        return_system_coordinates=True,
-    )
+    # t1 = tool.compare_images(
+    #     template_path=template_path,
+    #     target_path=target_path,
+    #     save_result=True,
+    #     result_path="image/compare_images_result.png",
+    #     return_system_coordinates=True,
+    # )
 
     
 
     import rich
-    rich.print("t1", t1)
-    print("-"*100)
-    t2 = tool.compare_images(
-        template_path=template_path,
-        target_path=target_path,
-        save_result=True,
-        result_path="image/compare_images_result_2.png",
-        return_system_coordinates=True,
-        enhancement_level="aggressive"
-    )
+    # rich.print("t1", t1)
+    # print("-"*100)
+    # t2 = tool.compare_images(
+    #     template_path=template_path,
+    #     target_path=target_path,
+    #     save_result=True,
+    #     result_path="image/compare_images_result_2.png",
+    #     return_system_coordinates=True,
+    #     enhancement_level="aggressive"
+    # )
 
-    rich.print("t2", t2)
-    print("-"*100)
+    # rich.print("t2", t2)
+    # print("-"*100)
     
     t3 = tool.compare_images(
         template_path=template_path,
@@ -60,21 +60,27 @@ def main():
         save_result=True,
         result_path="image/compare_images_result_3.png",
         return_system_coordinates=True,
-        enhancement_level="standard"
+        enhancement_level="standard",
+        # use_multi_scale=True,
     )
 
     rich.print("t3", t3)
-    print("-"*100)
-    t4 = tool.compare_images(
-        template_path=template_path,
-        target_path=target_path,
-        save_result=True,
-        result_path="image/compare_images_result_4.png",
-        return_system_coordinates=True,
-        enhancement_level="light"
-    )
-    rich.print("t4", t4)
+    # print("-"*100)
+    # t4 = tool.compare_images(
+    #     template_path=template_path,
+    #     target_path=target_path,
+    #     save_result=True,
+    #     result_path="image/compare_images_result_4.png",
+    #     return_system_coordinates=True,
+    #     enhancement_level="light"
+    # )
+    # rich.print("t4", t4)
     print("-"*100)
 
+    tool.click_image(
+        template=template_path,
+        target_image=target_path,
+        # enhancement_level="standard",
+    )
 if __name__ == "__main__":
     main()
