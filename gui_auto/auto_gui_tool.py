@@ -168,6 +168,8 @@ class GuiAutoTool:
         auto_scale: bool = True,
         default_max_retries: int = 3,
         default_retry_delay: float = 0.5,
+        confidence_retry_enabled: bool = True,
+        confidence_retry_attempts: int = 3,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         base_scale: Optional[float] = None,
@@ -185,6 +187,8 @@ class GuiAutoTool:
             auto_scale: 是否自动处理DPI和分辨率缩放
             default_max_retries: 默认最大重试次数
             default_retry_delay: 默认重试延迟时间（秒）
+            confidence_retry_enabled: 是否启用置信度不够时的重试机制
+            confidence_retry_attempts: 置信度重试的最大次数
             template_scale_info: 默认模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
                                - 推荐使用：描述模板图像的具体缩放信息，用于精确匹配
             target_scale_info: 默认目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
@@ -202,6 +206,8 @@ class GuiAutoTool:
         self.auto_scale = auto_scale
         self.default_max_retries = default_max_retries
         self.default_retry_delay = default_retry_delay
+        self.confidence_retry_enabled = confidence_retry_enabled
+        self.confidence_retry_attempts = confidence_retry_attempts
 
         # 保存默认缩放信息（优先级较高，推荐使用）
         self.default_template_scale_info = template_scale_info
@@ -1127,6 +1133,83 @@ class GuiAutoTool:
 
         return effective_template_info, effective_target_info
 
+    def _retry_with_confidence_check(
+        self,
+        match_func: Callable,
+        confidence_threshold: float,
+        max_attempts: Optional[int] = None,
+        delay: float = 0.5,
+        **kwargs
+    ) -> dict:
+        """
+        基于置信度的重试机制
+        
+        Args:
+            match_func: 匹配函数
+            confidence_threshold: 置信度阈值
+            max_attempts: 最大重试次数
+            delay: 重试延迟时间
+            **kwargs: 传递给匹配函数的参数
+            
+        Returns:
+            匹配结果字典
+        """
+        if not self.confidence_retry_enabled:
+            # 如果未启用置信度重试，直接执行一次
+            return match_func(**kwargs)
+        
+        if max_attempts is None:
+            max_attempts = self.confidence_retry_attempts
+            
+        best_result = None
+        best_confidence = 0.0
+        
+        for attempt in range(max_attempts):
+            try:
+                result = match_func(**kwargs)
+                current_confidence = result.get('confidence', 0.0)
+                
+                # 更新最佳结果
+                if current_confidence > best_confidence:
+                    best_confidence = current_confidence
+                    best_result = result
+                
+                # 如果达到置信度阈值，直接返回
+                if current_confidence >= confidence_threshold:
+                    if attempt > 0:
+                        logger.info(f"置信度重试成功：第 {attempt + 1} 次尝试达到置信度 {current_confidence:.3f}")
+                    return result
+                
+                # 如果未达到阈值且不是最后一次尝试，等待后重试
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        f"置信度重试：第 {attempt + 1} 次尝试置信度 {current_confidence:.3f} 低于阈值 {confidence_threshold:.3f}，{delay:.1f}秒后重试"
+                    )
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logger.warning(f"置信度重试：第 {attempt + 1} 次尝试失败: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delay)
+                continue
+        
+        # 如果所有尝试都未达到置信度阈值，返回最佳结果
+        if best_result:
+            logger.warning(
+                f"置信度重试：所有 {max_attempts} 次尝试均未达到阈值 {confidence_threshold:.3f}，返回最佳结果（置信度: {best_confidence:.3f}）"
+            )
+            return best_result
+        
+        # 如果没有任何结果，返回失败结果
+        return {
+            'found': False,
+            'confidence': 0.0,
+            'location': None,
+            'center': None,
+            'method': 'retry_failed',
+            'error': f'所有 {max_attempts} 次置信度重试均失败'
+        }
+
     def compare_images(
         self,
         template_path: Union[str, Path, np.ndarray],
@@ -1142,6 +1225,9 @@ class GuiAutoTool:
         use_multi_scale: Optional[bool] = None,
         enhancement_level: Optional[str] = None,
         use_feature_matching: bool = False,
+        confidence_retry_enabled: Optional[bool] = None,
+        confidence_retry_attempts: Optional[int] = None,
+        confidence_retry_delay: float = 0.5,
     ) -> dict:
         """
         比较两张图片，返回匹配结果
@@ -1160,6 +1246,9 @@ class GuiAutoTool:
             use_multi_scale: 是否使用多尺度匹配算法，提高不同分辨率下的识别率
             enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
             use_feature_matching: 是否强制使用特征匹配（SIFT/ORB），对旋转和缩放更鲁棒
+            confidence_retry_enabled: 是否启用置信度重试机制（None时使用默认设置）
+            confidence_retry_attempts: 置信度重试最大次数（None时使用默认设置）
+            confidence_retry_delay: 置信度重试延迟时间（秒）
 
         Returns:
             包含匹配结果的字典: {
@@ -1184,6 +1273,14 @@ class GuiAutoTool:
         effective_enhancement_level = (
             enhancement_level if enhancement_level is not None else self.default_enhancement_level
         )
+        
+        # 设置置信度重试参数
+        effective_confidence_retry_enabled = (
+            confidence_retry_enabled if confidence_retry_enabled is not None else self.confidence_retry_enabled
+        )
+        effective_confidence_retry_attempts = (
+            confidence_retry_attempts if confidence_retry_attempts is not None else self.confidence_retry_attempts
+        )
 
         # 获取有效的缩放信息
         effective_template_info, effective_target_info = self._get_effective_scale_info(
@@ -1191,22 +1288,35 @@ class GuiAutoTool:
         )
 
         print(f"effective_enhancement_level: {effective_enhancement_level}")
-        # 定义核心比较逻辑
-        return self._compare_images_core(
-            template_path,
-            target_path,
-            effective_method,
-            enhance_images,
-            save_result,
-            result_path,
-            return_system_coordinates,
-            region,
-            effective_template_info,
-            effective_target_info,
-            effective_use_multi_scale,
-            effective_enhancement_level,
-            use_feature_matching,
-        )
+        
+        # 定义核心比较逻辑函数
+        def _core_compare():
+            return self._compare_images_core(
+                template_path,
+                target_path,
+                effective_method,
+                enhance_images,
+                save_result,
+                result_path,
+                return_system_coordinates,
+                region,
+                effective_template_info,
+                effective_target_info,
+                effective_use_multi_scale,
+                effective_enhancement_level,
+                use_feature_matching,
+            )
+        
+        # 使用置信度重试机制
+        if effective_confidence_retry_enabled:
+            return self._retry_with_confidence_check(
+                match_func=_core_compare,
+                confidence_threshold=self.confidence,
+                max_attempts=effective_confidence_retry_attempts,
+                delay=confidence_retry_delay
+            )
+        else:
+            return _core_compare()
 
     def _unified_image_matching_core(
         self,
@@ -1613,6 +1723,9 @@ class GuiAutoTool:
         target_scale_info: Optional[dict] = None,
         use_multi_scale: Optional[bool] = None,
         enhancement_level: Optional[str] = None,
+        confidence_retry_enabled: Optional[bool] = None,
+        confidence_retry_attempts: Optional[int] = None,
+        confidence_retry_delay: float = 0.5,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         在目标图像中查找模板图像
@@ -1630,6 +1743,9 @@ class GuiAutoTool:
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             use_multi_scale: 是否使用多尺度匹配算法
             enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
+            confidence_retry_enabled: 是否启用置信度重试机制（None时使用默认设置）
+            confidence_retry_attempts: 置信度重试最大次数（None时使用默认设置）
+            confidence_retry_delay: 置信度重试延迟时间（秒）
 
         Returns:
             找到的图像位置 (left, top, width, height) 或 None
@@ -1649,6 +1765,14 @@ class GuiAutoTool:
         )
         effective_enhancement_level = (
             enhancement_level if enhancement_level is not None else self.default_enhancement_level
+        )
+        
+        # 设置置信度重试参数
+        effective_confidence_retry_enabled = (
+            confidence_retry_enabled if confidence_retry_enabled is not None else self.confidence_retry_enabled
+        )
+        effective_confidence_retry_attempts = (
+            confidence_retry_attempts if confidence_retry_attempts is not None else self.confidence_retry_attempts
         )
 
         # 获取有效的缩放信息
@@ -1681,7 +1805,39 @@ class GuiAutoTool:
                     effective_enhancement_level,
                 )
 
-        # 执行重试逻辑
+        # 如果启用置信度重试，使用包装函数
+        if effective_confidence_retry_enabled:
+            def _find_with_confidence_check():
+                # 使用 compare_images 获取完整结果（包含置信度）
+                result = self.compare_images(
+                    template_path=template,
+                    target_path=target_image,
+                    method=effective_method,
+                    enhance_images=enhance_images,
+                    region=region,
+                    template_scale_info=effective_template_info,
+                    target_scale_info=effective_target_info,
+                    use_multi_scale=effective_use_multi_scale,
+                    enhancement_level=effective_enhancement_level,
+                    confidence_retry_enabled=False  # 避免递归调用
+                )
+                return result
+            
+            # 使用置信度重试机制
+            retry_result = self._retry_with_confidence_check(
+                match_func=_find_with_confidence_check,
+                confidence_threshold=self.confidence,
+                max_attempts=effective_confidence_retry_attempts,
+                delay=confidence_retry_delay
+            )
+            
+            # 从结果中提取位置信息
+            if retry_result.get('found', False):
+                return retry_result.get('location')
+            else:
+                return None
+
+        # 执行常规重试逻辑（异常重试）
         current_delay = retry_delay
         last_exception = None
 
@@ -1868,6 +2024,9 @@ class GuiAutoTool:
         offset: Tuple[int, int] = (0, 0),
         enhancement_level: Optional[str] = None,
         region: Optional[Tuple[int, int, int, int]] = None,
+        confidence_retry_enabled: Optional[bool] = None,
+        confidence_retry_attempts: Optional[int] = None,
+        confidence_retry_delay: float = 0.5,
     ) -> bool:
         """
         点击图像
@@ -1889,6 +2048,9 @@ class GuiAutoTool:
                 target_image,
                 region=region,
                 enhancement_level=enhancement_level,
+                confidence_retry_enabled=confidence_retry_enabled,
+                confidence_retry_attempts=confidence_retry_attempts,
+                confidence_retry_delay=confidence_retry_delay,
             )
             logger.info(base_location)
             if not base_location:
