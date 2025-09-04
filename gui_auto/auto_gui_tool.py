@@ -168,12 +168,12 @@ class GuiAutoTool:
         auto_scale: bool = True,
         default_max_retries: int = 3,
         default_retry_delay: float = 0.5,
-        base_scale: Optional[float] = None,
-        base_resolution: Optional[Tuple[int, int]] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
+        base_scale: Optional[float] = None,
+        base_resolution: Optional[Tuple[int, int]] = None,
         default_use_multi_scale: bool = False,
-        default_enhancement_level: str = "adaptive",
+        default_enhancement_level: str = "light",
     ):
         """
         初始化GUI自动化工具
@@ -185,10 +185,14 @@ class GuiAutoTool:
             auto_scale: 是否自动处理DPI和分辨率缩放
             default_max_retries: 默认最大重试次数
             default_retry_delay: 默认重试延迟时间（秒）
-            base_scale: 自定义基准DPI缩放，不指定则使用默认值1.0
-            base_resolution: 自定义基准分辨率，不指定则使用默认值(1920, 1080)
             template_scale_info: 默认模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+                               - 推荐使用：描述模板图像的具体缩放信息，用于精确匹配
             target_scale_info: 默认目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+                              - 通常自动获取：描述目标环境的缩放信息
+            base_scale: 自定义基准DPI缩放，不指定则使用默认值1.0
+                       - 高级选项：用于自定义全局基准坐标系
+            base_resolution: 自定义基准分辨率，不指定则使用默认值(1920, 1080)
+                           - 高级选项：用于自定义全局基准坐标系
             default_use_multi_scale: 默认是否启用多尺度匹配
             default_enhancement_level: 默认图像增强级别 ("light", "standard", "aggressive", "adaptive")
         """
@@ -199,13 +203,13 @@ class GuiAutoTool:
         self.default_max_retries = default_max_retries
         self.default_retry_delay = default_retry_delay
 
-        # 保存自定义基准值
-        self.base_scale = base_scale
-        self.base_resolution = base_resolution
-
-        # 保存默认缩放信息
+        # 保存默认缩放信息（优先级较高，推荐使用）
         self.default_template_scale_info = template_scale_info
         self.default_target_scale_info = target_scale_info
+        
+        # 保存自定义基准值（高级选项，优先级较低）
+        self.base_scale = base_scale
+        self.base_resolution = base_resolution
         self.default_use_multi_scale = default_use_multi_scale
         self.default_enhancement_level = default_enhancement_level
 
@@ -228,7 +232,7 @@ class GuiAutoTool:
         Returns:
             工具版本信息
         """
-        return 1.0
+        return 1.1
 
     def get_screen_screenshot(self) -> np.ndarray:
         """
@@ -1132,6 +1136,7 @@ class GuiAutoTool:
         save_result: bool = False,
         result_path: Optional[str] = None,
         return_system_coordinates: bool = False,
+        region: Optional[Tuple[int, int, int, int]] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         use_multi_scale: Optional[bool] = None,
@@ -1149,6 +1154,7 @@ class GuiAutoTool:
             save_result: 是否保存标注结果图片
             result_path: 结果图片保存路径
             return_system_coordinates: 是否返回系统坐标（默认返回基准坐标）
+            region: 搜索区域 (x, y, w, h) - 基准坐标，限制在目标图像的指定区域内搜索
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             use_multi_scale: 是否使用多尺度匹配算法，提高不同分辨率下的识别率
@@ -1193,6 +1199,7 @@ class GuiAutoTool:
             save_result,
             result_path,
             return_system_coordinates,
+            region,
             effective_template_info,
             effective_target_info,
             effective_use_multi_scale,
@@ -1389,6 +1396,7 @@ class GuiAutoTool:
         save_result: bool,
         result_path: Optional[str],
         return_system_coordinates: bool,
+        region: Optional[Tuple[int, int, int, int]] = None,
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
@@ -1408,6 +1416,13 @@ class GuiAutoTool:
             if self.auto_scale:
                 target_img = self.adjust_target_image_to_base(target_img)
 
+            # 如果指定了搜索区域，裁剪目标图像（region应该是基准坐标）
+            region_offset = (0, 0)
+            if region:
+                x, y, w, h = region
+                target_img = target_img[y : y + h, x : x + w]
+                region_offset = (x, y)
+
             # 图像预处理
             if enhance_images:
                 template_processed = self.preprocess_image(
@@ -1422,7 +1437,7 @@ class GuiAutoTool:
 
             # 执行特征匹配
             feature_result = self._feature_based_matching(
-                template_processed, target_processed
+                template_processed, target_processed, region_offset
             )
             match_result = {
                 "confidence": feature_result["confidence"],
@@ -1451,7 +1466,7 @@ class GuiAutoTool:
                 target_image=target_path,
                 method=method,
                 enhance_images=enhance_images,
-                region=None,  # compare_images 不使用区域限制
+                region=region,  # 传递区域限制参数
                 template_scale_info=template_scale_info,
                 target_scale_info=target_scale_info,
                 use_multi_scale=use_multi_scale,
