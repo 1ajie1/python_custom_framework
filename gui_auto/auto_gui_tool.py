@@ -173,7 +173,7 @@ class GuiAutoTool:
         base_scale: Optional[float] = None,
         base_resolution: Optional[Tuple[int, int]] = None,
         default_use_multi_scale: bool = False,
-        default_enhancement_level: str = "light",
+        default_enhancement_level: Optional[str] = None,
     ):
         """
         初始化GUI自动化工具
@@ -194,7 +194,7 @@ class GuiAutoTool:
             base_resolution: 自定义基准分辨率，不指定则使用默认值(1920, 1080)
                            - 高级选项：用于自定义全局基准坐标系
             default_use_multi_scale: 默认是否启用多尺度匹配
-            default_enhancement_level: 默认图像增强级别 ("light", "standard", "aggressive", "adaptive")
+            default_enhancement_level: 默认图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
         """
         self.confidence = confidence
         self.timeout = timeout
@@ -409,7 +409,7 @@ class GuiAutoTool:
         self,
         image: np.ndarray,
         enhance: bool = True,
-        enhancement_level: str = "standard",
+        enhancement_level: Optional[str] = None,
     ) -> np.ndarray:
         """
         图像预处理以提高匹配精度
@@ -417,12 +417,12 @@ class GuiAutoTool:
         Args:
             image: 输入图像
             enhance: 是否进行图像增强
-            enhancement_level: 增强级别 ("light", "standard", "aggressive", "adaptive")
+            enhancement_level: 增强级别 (None, "light", "standard", "aggressive", "adaptive")
 
         Returns:
             处理后的图像
         """
-        if not enhance:
+        if not enhance or enhancement_level is None:
             return image
 
         if enhancement_level == "adaptive":
@@ -1158,7 +1158,7 @@ class GuiAutoTool:
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             use_multi_scale: 是否使用多尺度匹配算法，提高不同分辨率下的识别率
-            enhancement_level: 图像增强级别 ("light", "standard", "aggressive", "adaptive")
+            enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
             use_feature_matching: 是否强制使用特征匹配（SIFT/ORB），对旋转和缩放更鲁棒
 
         Returns:
@@ -1182,7 +1182,7 @@ class GuiAutoTool:
             else self.default_use_multi_scale
         )
         effective_enhancement_level = (
-            enhancement_level or self.default_enhancement_level
+            enhancement_level if enhancement_level is not None else self.default_enhancement_level
         )
 
         # 获取有效的缩放信息
@@ -1190,6 +1190,7 @@ class GuiAutoTool:
             template_scale_info, target_scale_info
         )
 
+        print(f"effective_enhancement_level: {effective_enhancement_level}")
         # 定义核心比较逻辑
         return self._compare_images_core(
             template_path,
@@ -1400,7 +1401,7 @@ class GuiAutoTool:
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
-        enhancement_level: str = "adaptive",
+        enhancement_level: Optional[str] = None,
         use_feature_matching: bool = False,
     ) -> dict:
         """
@@ -1628,7 +1629,7 @@ class GuiAutoTool:
             template_scale_info: 模板图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             use_multi_scale: 是否使用多尺度匹配算法
-            enhancement_level: 图像增强级别 ("light", "standard", "aggressive", "adaptive")
+            enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
 
         Returns:
             找到的图像位置 (left, top, width, height) 或 None
@@ -1647,7 +1648,7 @@ class GuiAutoTool:
             else self.default_use_multi_scale
         )
         effective_enhancement_level = (
-            enhancement_level or self.default_enhancement_level
+            enhancement_level if enhancement_level is not None else self.default_enhancement_level
         )
 
         # 获取有效的缩放信息
@@ -1717,7 +1718,7 @@ class GuiAutoTool:
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
-        enhancement_level: str = "adaptive",
+        enhancement_level: Optional[str] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         find_image_in_target 的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1771,7 +1772,7 @@ class GuiAutoTool:
         template_scale_info: Optional[dict] = None,
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
-        enhancement_level: str = "adaptive",
+        enhancement_level: Optional[str] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         多方法图像匹配的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1799,7 +1800,7 @@ class GuiAutoTool:
                         template_scale_info=template_scale_info,
                         target_scale_info=target_scale_info,
                         use_multi_scale=use_multi_scale,
-                        enhancement_level=enhancement_level if enhance else "light",
+                        enhancement_level=enhancement_level if enhance else None,
                     )
 
                     if match_result["found"]:
@@ -1865,7 +1866,7 @@ class GuiAutoTool:
         target_image: Union[str, Path, np.ndarray],
         button: str = "left",
         offset: Tuple[int, int] = (0, 0),
-        enhancement_level: str = "standard",
+        enhancement_level: Optional[str] = None,
         region: Optional[Tuple[int, int, int, int]] = None,
     ) -> bool:
         """
@@ -1921,7 +1922,7 @@ class GuiAutoTool:
         self,
         template: Union[str, Path, np.ndarray],
         target_image: Union[str, Path, np.ndarray],
-        enhancement_level: str = "standard",
+        enhancement_level: Optional[str] = None,
         offset: Tuple[int, int] = (0, 0),
         region: Optional[Tuple[int, int, int, int]] = None,
     ) -> bool:
@@ -1978,7 +1979,7 @@ class GuiAutoTool:
         to_template: Union[str, Path, np.ndarray],
         target_image: Union[str, Path, np.ndarray],
         duration: float = 1.0,
-        enhancement_level: str = "standard",
+        enhancement_level: Optional[str] = None,
     ) -> bool:
         """
         从一个图像拖拽到另一个图像
