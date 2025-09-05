@@ -1225,6 +1225,7 @@ class GuiAutoTool:
         use_multi_scale: Optional[bool] = None,
         enhancement_level: Optional[str] = None,
         use_feature_matching: bool = False,
+        confidence_threshold: Optional[float] = None,
         confidence_retry_enabled: Optional[bool] = None,
         confidence_retry_attempts: Optional[int] = None,
         confidence_retry_delay: float = 0.5,
@@ -1246,6 +1247,7 @@ class GuiAutoTool:
             use_multi_scale: 是否使用多尺度匹配算法，提高不同分辨率下的识别率
             enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
             use_feature_matching: 是否强制使用特征匹配（SIFT/ORB），对旋转和缩放更鲁棒
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
             confidence_retry_enabled: 是否启用置信度重试机制（None时使用默认设置）
             confidence_retry_attempts: 置信度重试最大次数（None时使用默认设置）
             confidence_retry_delay: 置信度重试延迟时间（秒）
@@ -1286,6 +1288,11 @@ class GuiAutoTool:
         effective_template_info, effective_target_info = self._get_effective_scale_info(
             template_scale_info, target_scale_info
         )
+        
+        # 设置置信度阈值
+        effective_confidence_threshold = (
+            confidence_threshold if confidence_threshold is not None else self.confidence
+        )
 
         print(f"effective_enhancement_level: {effective_enhancement_level}")
         
@@ -1311,7 +1318,7 @@ class GuiAutoTool:
         if effective_confidence_retry_enabled:
             return self._retry_with_confidence_check(
                 match_func=_core_compare,
-                confidence_threshold=self.confidence,
+                confidence_threshold=effective_confidence_threshold,
                 max_attempts=effective_confidence_retry_attempts,
                 delay=confidence_retry_delay
             )
@@ -1723,6 +1730,7 @@ class GuiAutoTool:
         target_scale_info: Optional[dict] = None,
         use_multi_scale: Optional[bool] = None,
         enhancement_level: Optional[str] = None,
+        confidence_threshold: Optional[float] = None,
         confidence_retry_enabled: Optional[bool] = None,
         confidence_retry_attempts: Optional[int] = None,
         confidence_retry_delay: float = 0.5,
@@ -1743,6 +1751,7 @@ class GuiAutoTool:
             target_scale_info: 目标图像缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             use_multi_scale: 是否使用多尺度匹配算法
             enhancement_level: 图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
             confidence_retry_enabled: 是否启用置信度重试机制（None时使用默认设置）
             confidence_retry_attempts: 置信度重试最大次数（None时使用默认设置）
             confidence_retry_delay: 置信度重试延迟时间（秒）
@@ -1773,6 +1782,11 @@ class GuiAutoTool:
         )
         effective_confidence_retry_attempts = (
             confidence_retry_attempts if confidence_retry_attempts is not None else self.confidence_retry_attempts
+        )
+        
+        # 设置置信度阈值
+        effective_confidence_threshold = (
+            confidence_threshold if confidence_threshold is not None else self.confidence
         )
 
         # 获取有效的缩放信息
@@ -1826,7 +1840,7 @@ class GuiAutoTool:
             # 使用置信度重试机制
             retry_result = self._retry_with_confidence_check(
                 match_func=_find_with_confidence_check,
-                confidence_threshold=self.confidence,
+                confidence_threshold=effective_confidence_threshold,
                 max_attempts=effective_confidence_retry_attempts,
                 delay=confidence_retry_delay
             )
@@ -2024,6 +2038,7 @@ class GuiAutoTool:
         offset: Tuple[int, int] = (0, 0),
         enhancement_level: Optional[str] = None,
         region: Optional[Tuple[int, int, int, int]] = None,
+        confidence_threshold: Optional[float] = None,
         confidence_retry_enabled: Optional[bool] = None,
         confidence_retry_attempts: Optional[int] = None,
         confidence_retry_delay: float = 0.5,
@@ -2037,6 +2052,10 @@ class GuiAutoTool:
             button: 鼠标按键 ('left', 'right', 'middle')
             offset: 点击偏移量 (x_offset, y_offset) - 基准坐标偏移
             region: 搜索区域 - 基准坐标
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
+            confidence_retry_enabled: 是否启用置信度重试机制
+            confidence_retry_attempts: 置信度重试最大次数
+            confidence_retry_delay: 置信度重试延迟时间（秒）
 
         Returns:
             是否成功点击
@@ -2048,6 +2067,7 @@ class GuiAutoTool:
                 target_image,
                 region=region,
                 enhancement_level=enhancement_level,
+                confidence_threshold=confidence_threshold,
                 confidence_retry_enabled=confidence_retry_enabled,
                 confidence_retry_attempts=confidence_retry_attempts,
                 confidence_retry_delay=confidence_retry_delay,
@@ -2087,6 +2107,7 @@ class GuiAutoTool:
         enhancement_level: Optional[str] = None,
         offset: Tuple[int, int] = (0, 0),
         region: Optional[Tuple[int, int, int, int]] = None,
+        confidence_threshold: Optional[float] = None,
     ) -> bool:
         """
         双击图像
@@ -2094,8 +2115,10 @@ class GuiAutoTool:
         Args:
             template: 模板图像路径或numpy数组
             target_image: 目标图像路径或numpy数组
+            enhancement_level: 图像增强级别
             offset: 点击偏移量 - 基准坐标偏移
             region: 搜索区域 - 基准坐标
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
 
         Returns:
             是否成功双击
@@ -2107,6 +2130,7 @@ class GuiAutoTool:
                 target_image,
                 region=region,
                 enhancement_level=enhancement_level,
+                confidence_threshold=confidence_threshold,
             )
             if not base_location:
                 logger.error("双击失败：未找到目标图像")
@@ -2142,6 +2166,7 @@ class GuiAutoTool:
         target_image: Union[str, Path, np.ndarray],
         duration: float = 1.0,
         enhancement_level: Optional[str] = None,
+        confidence_threshold: Optional[float] = None,
     ) -> bool:
         """
         从一个图像拖拽到另一个图像
@@ -2151,6 +2176,8 @@ class GuiAutoTool:
             to_template: 目标图像模板
             target_image: 目标图像路径或numpy数组
             duration: 拖拽持续时间
+            enhancement_level: 图像增强级别
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
 
         Returns:
             是否成功拖拽
@@ -2158,7 +2185,7 @@ class GuiAutoTool:
         try:
             # 找到起始位置（基准坐标）
             from_base_location = self.find_image_in_target(
-                from_template, target_image, enhancement_level=enhancement_level
+                from_template, target_image, enhancement_level=enhancement_level, confidence_threshold=confidence_threshold
             )
             if not from_base_location:
                 logger.error("拖拽失败：未找到起始图像")
@@ -2168,7 +2195,7 @@ class GuiAutoTool:
 
             # 找到目标位置（基准坐标）
             to_base_location = self.find_image_in_target(
-                to_template, target_image, enhancement_level=enhancement_level
+                to_template, target_image, enhancement_level=enhancement_level, confidence_threshold=confidence_threshold
             )
             if not to_base_location:
                 logger.error("拖拽失败：未找到目标图像")
@@ -2198,7 +2225,7 @@ class GuiAutoTool:
             logger.error(f"拖拽失败：{e}")
             return False
 
-    def type_text(self, text: str, interval: float = 0.05) -> None:
+    def type_text(self, text: str, interval: float = 0.1) -> None:
         """
         输入文本
 
@@ -2235,6 +2262,7 @@ class GuiAutoTool:
         target_image: Union[str, Path, np.ndarray],
         offset: Tuple[int, int] = (0, 0),
         duration: float = 0.5,
+        confidence_threshold: Optional[float] = None,
     ) -> bool:
         """
         移动鼠标到图像位置
@@ -2244,13 +2272,14 @@ class GuiAutoTool:
             target_image: 目标图像路径或numpy数组
             offset: 偏移量 - 基准坐标偏移
             duration: 移动持续时间
+            confidence_threshold: 本次匹配的置信度阈值 (0.0-1.0)，None时使用默认值
 
         Returns:
             是否成功移动
         """
         try:
             # 获取基准坐标位置
-            base_location = self.find_image_in_target(template, target_image)
+            base_location = self.find_image_in_target(template, target_image, confidence_threshold=confidence_threshold)
             if not base_location:
                 logger.error("鼠标移动失败：未找到目标图像")
                 return False
