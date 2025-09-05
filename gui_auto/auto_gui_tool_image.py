@@ -176,6 +176,9 @@ class GuiAutoTool:
         base_resolution: Optional[Tuple[int, int]] = None,
         default_use_multi_scale: bool = False,
         default_enhancement_level: Optional[str] = None,
+        default_use_pyramid: bool = False,
+        pyramid_levels: int = 4,
+        pyramid_scale_factor: float = 0.5,
     ):
         """
         初始化GUI自动化工具
@@ -199,6 +202,9 @@ class GuiAutoTool:
                            - 高级选项：用于自定义全局基准坐标系
             default_use_multi_scale: 默认是否启用多尺度匹配
             default_enhancement_level: 默认图像增强级别 (None, "light", "standard", "aggressive", "adaptive")
+            default_use_pyramid: 默认是否启用金字塔匹配
+            pyramid_levels: 金字塔层数 (2-6层)
+            pyramid_scale_factor: 金字塔每层的缩放因子 (0.3-0.8)
         """
         self.confidence = confidence
         self.timeout = timeout
@@ -218,6 +224,9 @@ class GuiAutoTool:
         self.base_resolution = base_resolution
         self.default_use_multi_scale = default_use_multi_scale
         self.default_enhancement_level = default_enhancement_level
+        self.default_use_pyramid = default_use_pyramid
+        self.pyramid_levels = max(2, min(6, pyramid_levels))  # 限制在2-6层
+        self.pyramid_scale_factor = max(0.3, min(0.8, pyramid_scale_factor))  # 限制在0.3-0.8
 
         # 获取系统缩放信息（使用自定义基准值）
         self.scale_info = SystemInfo.get_scale_factors(
@@ -1016,6 +1025,230 @@ class GuiAutoTool:
             return intersection / union if union > 0 else 0
         return 0
 
+    def _build_image_pyramid(
+        self, image: np.ndarray, levels: int, scale_factor: float
+    ) -> list:
+        """
+        构建图像金字塔
+        
+        Args:
+            image: 输入图像
+            levels: 金字塔层数
+            scale_factor: 每层缩放因子
+            
+        Returns:
+            金字塔图像列表，从原图到最小分辨率
+        """
+        pyramid = [image]  # 第0层是原图
+        
+        current_image = image.copy()
+        for level in range(1, levels):
+            # 计算新尺寸
+            new_height = max(1, int(current_image.shape[0] * scale_factor))
+            new_width = max(1, int(current_image.shape[1] * scale_factor))
+            
+            # 如果图像太小，停止构建
+            if new_height < 8 or new_width < 8:
+                break
+                
+            # 缩放图像
+            scaled_image = cv2.resize(
+                current_image, (new_width, new_height), interpolation=cv2.INTER_AREA
+            )
+            pyramid.append(scaled_image)
+            current_image = scaled_image
+            
+            logger.debug(f"金字塔第{level}层: {new_width}x{new_height}")
+        
+        return pyramid
+
+    def _pyramid_template_matching(
+        self,
+        template: np.ndarray,
+        target: np.ndarray,
+        cv_method: int,
+        template_scale_info: Optional[dict] = None,
+        target_scale_info: Optional[dict] = None,
+        region_offset: Tuple[int, int] = (0, 0),
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
+    ) -> dict:
+        """
+        金字塔模板匹配，从低分辨率到高分辨率逐层细化
+        
+        Args:
+            template: 模板图像
+            target: 目标图像
+            cv_method: OpenCV匹配方法
+            template_scale_info: 模板缩放信息
+            target_scale_info: 目标缩放信息
+            region_offset: 区域偏移量
+            pyramid_levels: 金字塔层数
+            pyramid_scale_factor: 金字塔缩放因子
+            
+        Returns:
+            匹配结果字典
+        """
+        # 使用传入参数或默认值
+        levels = pyramid_levels if pyramid_levels is not None else self.pyramid_levels
+        scale_factor = pyramid_scale_factor if pyramid_scale_factor is not None else self.pyramid_scale_factor
+        
+        logger.debug(f"开始金字塔匹配 - 层数: {levels}, 缩放因子: {scale_factor}")
+        
+        # 构建模板和目标图像的金字塔
+        template_pyramid = self._build_image_pyramid(template, levels, scale_factor)
+        target_pyramid = self._build_image_pyramid(target, levels, scale_factor)
+        
+        # 确保两个金字塔层数一致
+        actual_levels = min(len(template_pyramid), len(target_pyramid))
+        
+        best_confidence = 0
+        best_location = None
+        best_scale = 1.0
+        
+        # 计算基础缩放比例
+        base_scale = 1.0
+        if template_scale_info and target_scale_info:
+            base_scale = self._calculate_optimal_scale(
+                template_scale_info, target_scale_info
+            )
+        elif self.auto_scale and template_scale_info:
+            base_scale = self._calculate_optimal_scale(
+                template_scale_info, self.get_current_system_scale_info()
+            )
+        
+        # 从最高层（最低分辨率）开始匹配
+        search_region = None
+        pyramid_results = []
+        
+        for level in range(actual_levels - 1, -1, -1):  # 从高层到低层
+            template_img = template_pyramid[level]
+            target_img = target_pyramid[level]
+            
+            # 计算当前层的缩放因子
+            level_scale_factor = scale_factor ** level
+            current_region_offset = (
+                int(region_offset[0] * level_scale_factor),
+                int(region_offset[1] * level_scale_factor)
+            )
+            
+            logger.debug(f"金字塔第{level}层匹配 - 模板: {template_img.shape[:2]}, 目标: {target_img.shape[:2]}")
+            
+            # 如果有搜索区域限制，裁剪目标图像
+            cropped_target = target_img
+            crop_offset = (0, 0)
+            
+            if search_region is not None:
+                # 将上一层的搜索区域映射到当前层
+                x, y, w, h = search_region
+                scale_up = 1.0 / scale_factor
+                
+                # 扩展搜索区域以确保不遗漏
+                expansion = max(10, int(min(template_img.shape[:2]) * 0.5))
+                x = max(0, int(x * scale_up) - expansion)
+                y = max(0, int(y * scale_up) - expansion)
+                w = min(target_img.shape[1] - x, int(w * scale_up) + 2 * expansion)
+                h = min(target_img.shape[0] - y, int(h * scale_up) + 2 * expansion)
+                
+                if w > template_img.shape[1] and h > template_img.shape[0]:
+                    cropped_target = target_img[y:y+h, x:x+w]
+                    crop_offset = (x, y)
+                    logger.debug(f"第{level}层搜索区域: ({x}, {y}, {w}, {h})")
+            
+            # 在当前层进行多尺度匹配
+            if level == actual_levels - 1:
+                # 最高层使用较大的尺度范围
+                scale_range = [base_scale * f for f in [0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4]]
+            else:
+                # 其他层使用较小的尺度范围
+                scale_range = [base_scale * f for f in [0.9, 0.95, 1.0, 1.05, 1.1]]
+            
+            level_best_confidence = 0
+            level_best_location = None
+            level_best_scale = 1.0
+            
+            for scale in scale_range:
+                try:
+                    # 缩放模板
+                    if abs(scale - 1.0) < 0.01:
+                        scaled_template = template_img
+                    else:
+                        new_h = int(template_img.shape[0] * scale)
+                        new_w = int(template_img.shape[1] * scale)
+                        if new_h <= 0 or new_w <= 0 or new_h > cropped_target.shape[0] or new_w > cropped_target.shape[1]:
+                            continue
+                        scaled_template = cv2.resize(
+                            template_img, (new_w, new_h), interpolation=cv2.INTER_CUBIC
+                        )
+                    
+                    # 执行模板匹配
+                    result = cv2.matchTemplate(cropped_target, scaled_template, cv_method)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                    
+                    # 获取置信度和位置
+                    if cv_method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
+                        confidence = 1 - min_val
+                        match_loc = min_loc
+                    else:
+                        confidence = max_val
+                        match_loc = max_loc
+                    
+                    # 更新最佳结果
+                    if confidence > level_best_confidence:
+                        level_best_confidence = confidence
+                        h, w = scaled_template.shape[:2]
+                        # 转换回原图坐标
+                        actual_x = match_loc[0] + crop_offset[0] + current_region_offset[0]
+                        actual_y = match_loc[1] + crop_offset[1] + current_region_offset[1]
+                        level_best_location = (actual_x, actual_y, w, h)
+                        level_best_scale = scale
+                
+                except Exception as e:
+                    logger.debug(f"第{level}层尺度{scale:.2f}匹配失败: {e}")
+                    continue
+            
+            pyramid_results.append({
+                'level': level,
+                'confidence': level_best_confidence,
+                'location': level_best_location,
+                'scale': level_best_scale
+            })
+            
+            logger.debug(f"第{level}层最佳结果 - 置信度: {level_best_confidence:.3f}, 位置: {level_best_location}")
+            
+            # 更新全局最佳结果
+            if level_best_confidence > best_confidence:
+                best_confidence = level_best_confidence
+                # 将位置映射回原图尺寸
+                if level_best_location:
+                    scale_to_original = 1.0 / level_scale_factor
+                    x, y, w, h = level_best_location
+                    best_location = (
+                        int(x * scale_to_original),
+                        int(y * scale_to_original),
+                        int(w * scale_to_original),
+                        int(h * scale_to_original)
+                    )
+                best_scale = level_best_scale
+            
+            # 设置下一层的搜索区域
+            if level_best_location and level > 0:
+                search_region = level_best_location
+                
+            # 如果在高层找到高置信度匹配，可以提前终止
+            if level >= actual_levels - 2 and level_best_confidence > 0.95:
+                logger.debug(f"第{level}层找到高置信度匹配，提前终止")
+                break
+        
+        logger.debug(f"金字塔匹配完成 - 最佳置信度: {best_confidence:.3f}, 最佳位置: {best_location}")
+        
+        return {
+            "confidence": best_confidence,
+            "location": best_location,
+            "scale": best_scale,
+            "pyramid_results": pyramid_results,
+        }
+
     def _calculate_optimal_scale(
         self, template_scale_info: dict, target_scale_info: dict
     ) -> float:
@@ -1229,6 +1462,9 @@ class GuiAutoTool:
         confidence_retry_enabled: Optional[bool] = None,
         confidence_retry_attempts: Optional[int] = None,
         confidence_retry_delay: float = 0.5,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> dict:
         """
         比较两张图片，返回匹配结果
@@ -1312,6 +1548,9 @@ class GuiAutoTool:
                 effective_use_multi_scale,
                 effective_enhancement_level,
                 use_feature_matching,
+                use_pyramid,
+                pyramid_levels,
+                pyramid_scale_factor,
             )
         
         # 使用置信度重试机制
@@ -1336,6 +1575,9 @@ class GuiAutoTool:
         target_scale_info: Optional[dict] = None,
         use_multi_scale: Optional[bool] = None,
         enhancement_level: Optional[str] = None,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> dict:
         """
         统一的图像匹配核心函数
@@ -1348,6 +1590,9 @@ class GuiAutoTool:
             region: 搜索区域 (x, y, w, h) - 基准坐标
             template_scale_info: 模板图像的缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
             target_scale_info: 目标图像的缩放信息 {'dpi_scale': float, 'resolution': (w, h)}
+            use_pyramid: 是否使用金字塔匹配
+            pyramid_levels: 金字塔层数
+            pyramid_scale_factor: 金字塔缩放因子
 
         Returns:
             包含匹配结果的字典: {
@@ -1371,6 +1616,11 @@ class GuiAutoTool:
             )
             effective_enhancement_level = (
                 enhancement_level or self.default_enhancement_level
+            )
+            effective_use_pyramid = (
+                use_pyramid
+                if use_pyramid is not None
+                else self.default_use_pyramid
             )
 
             # 获取有效的缩放信息
@@ -1422,7 +1672,19 @@ class GuiAutoTool:
             cv_method = methods.get(effective_method, cv2.TM_CCOEFF_NORMED)
 
             # 执行匹配算法
-            if effective_enhancement_level == "adaptive" and effective_use_multi_scale:
+            if effective_use_pyramid:
+                # 金字塔模板匹配
+                match_result = self._pyramid_template_matching(
+                    template_processed,
+                    target_processed,
+                    cv_method,
+                    effective_template_info,
+                    effective_target_info,
+                    region_offset,
+                    pyramid_levels,
+                    pyramid_scale_factor,
+                )
+            elif effective_enhancement_level == "adaptive" and effective_use_multi_scale:
                 # 自适应增强模式下使用混合匹配
                 match_result = self._hybrid_matching(
                     template_processed,
@@ -1520,6 +1782,9 @@ class GuiAutoTool:
         use_multi_scale: bool = True,
         enhancement_level: Optional[str] = None,
         use_feature_matching: bool = False,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> dict:
         """
         compare_images 的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1589,6 +1854,9 @@ class GuiAutoTool:
                 target_scale_info=target_scale_info,
                 use_multi_scale=use_multi_scale,
                 enhancement_level=enhancement_level,
+                use_pyramid=use_pyramid,
+                pyramid_levels=pyramid_levels,
+                pyramid_scale_factor=pyramid_scale_factor,
             )
 
         # 检查匹配是否成功
@@ -1734,6 +2002,9 @@ class GuiAutoTool:
         confidence_retry_enabled: Optional[bool] = None,
         confidence_retry_attempts: Optional[int] = None,
         confidence_retry_delay: float = 0.5,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         在目标图像中查找模板图像
@@ -1805,6 +2076,9 @@ class GuiAutoTool:
                     effective_target_info,
                     effective_use_multi_scale,
                     effective_enhancement_level,
+                    use_pyramid,
+                    pyramid_levels,
+                    pyramid_scale_factor,
                 )
             else:
                 return self._find_image_in_target_core(
@@ -1817,6 +2091,9 @@ class GuiAutoTool:
                     effective_target_info,
                     effective_use_multi_scale,
                     effective_enhancement_level,
+                    use_pyramid,
+                    pyramid_levels,
+                    pyramid_scale_factor,
                 )
 
         # 如果启用置信度重试，使用包装函数
@@ -1833,7 +2110,10 @@ class GuiAutoTool:
                     target_scale_info=effective_target_info,
                     use_multi_scale=effective_use_multi_scale,
                     enhancement_level=effective_enhancement_level,
-                    confidence_retry_enabled=False  # 避免递归调用
+                    confidence_retry_enabled=False,  # 避免递归调用
+                    use_pyramid=use_pyramid,
+                    pyramid_levels=pyramid_levels,
+                    pyramid_scale_factor=pyramid_scale_factor,
                 )
                 return result
             
@@ -1889,6 +2169,9 @@ class GuiAutoTool:
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
         enhancement_level: Optional[str] = None,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         find_image_in_target 的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1905,6 +2188,9 @@ class GuiAutoTool:
                 target_scale_info=target_scale_info,
                 use_multi_scale=use_multi_scale,
                 enhancement_level=enhancement_level,
+                use_pyramid=use_pyramid,
+                pyramid_levels=pyramid_levels,
+                pyramid_scale_factor=pyramid_scale_factor,
             )
 
             # 检查匹配是否成功
@@ -1943,6 +2229,9 @@ class GuiAutoTool:
         target_scale_info: Optional[dict] = None,
         use_multi_scale: bool = True,
         enhancement_level: Optional[str] = None,
+        use_pyramid: Optional[bool] = None,
+        pyramid_levels: Optional[int] = None,
+        pyramid_scale_factor: Optional[float] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         """
         多方法图像匹配的核心实现逻辑 - 使用统一的核心匹配函数
@@ -1971,6 +2260,9 @@ class GuiAutoTool:
                         target_scale_info=target_scale_info,
                         use_multi_scale=use_multi_scale,
                         enhancement_level=enhancement_level if enhance else None,
+                        use_pyramid=use_pyramid,
+                        pyramid_levels=pyramid_levels,
+                        pyramid_scale_factor=pyramid_scale_factor,
                     )
 
                     if match_result["found"]:
