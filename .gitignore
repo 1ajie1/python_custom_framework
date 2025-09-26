@@ -216,3 +216,5 @@ test_*
 tmp*
 
 pyramid*
+
+.cursor
