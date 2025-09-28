@@ -60,7 +60,7 @@ result = tool.find_image("button.png")
 result = tool.find_image("button.png", "screenshot.png", algorithm="feature")
 
 # 使用自定义参数
-result = tool.find_image("button.png", confidence=0.9, scale_range=(0.8, 1.2))
+result = tool.find_image("button.png", confidence=0.9, pyramid_levels=6)
 ```
 
 ### `find_and_click(template, target=None, algorithm="template", **kwargs)`

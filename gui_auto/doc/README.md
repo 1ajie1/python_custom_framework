@@ -16,6 +16,7 @@ GUI自动化框架是一个功能强大、易于使用的Python库，用于自�
 - [主类API](main_class.md) - 主类GuiAutoToolV2的完整API
 - [核心模块](core_modules.md) - 核心配置和工具模块
 - [算法模块](algorithms.md) - 图像匹配算法
+- [参数配置](parameter_configuration.md) - 详细的参数配置指南
 - [操作模块](operations.md) - GUI操作模块
 - [平台模块](platform.md) - 跨平台适配
 - [工具模块](utils.md) - 实用工具函数

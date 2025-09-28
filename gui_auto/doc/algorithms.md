@@ -18,15 +18,13 @@ class MatchResult:
 
 | 属性 | 类型 | 描述 |
 |------|------|------|
-| `success` | bool | 是否匹配成功 |
-| `position` | tuple | 匹配位置 (x, y) |
+| `found` | bool | 是否匹配成功 |
+| `center` | tuple | 匹配中心位置 (x, y) |
 | `confidence` | float | 匹配置信度 (0-1) |
-| `size` | tuple | 匹配区域大小 (width, height) |
-| `scale` | float | 匹配时的缩放比例 |
-| `method` | str | 使用的匹配方法 |
-| `algorithm` | str | 使用的算法名称 |
-| `processing_time` | float | 处理时间（秒） |
-| `details` | dict | 详细信息 |
+| `bbox` | tuple | 匹配边界框 (x, y, width, height) |
+| `scale_factor` | float | 匹配时的缩放比例 |
+| `algorithm_name` | str | 使用的算法名称 |
+| `metadata` | dict | 详细信息和元数据 |
 
 ### 方法
 
@@ -40,8 +38,8 @@ class MatchResult:
 **示例:**
 ```python
 result = tool.find_image("button.png")
-if result.is_valid():
-    print(f"匹配成功，位置: {result.position}")
+if result.found:
+    print(f"匹配成功，位置: {result.center}")
 ```
 
 #### `get_center() -> tuple`
@@ -53,7 +51,7 @@ if result.is_valid():
 
 **示例:**
 ```python
-center = result.get_center()
+center = result.center
 print(f"中心点: {center}")
 ```
 
@@ -66,7 +64,7 @@ print(f"中心点: {center}")
 
 **示例:**
 ```python
-bounds = result.get_bounds()
+bounds = result.bbox
 print(f"边界: {bounds}")
 ```
 
@@ -367,6 +365,135 @@ class CustomAlgorithm(MatchingAlgorithm):
 AlgorithmFactory.register_algorithm("custom", CustomAlgorithm)
 ```
 
+## 参数传递功能
+
+### 概述
+
+框架支持为不同的匹配算法传递特定参数，所有参数都可以通过 `find_image()` 方法的 `**kwargs` 参数传递。
+
+### 模板匹配参数
+
+```python
+result = tool.find_image(
+    "button.png",
+    algorithm="template",
+    method="TM_CCOEFF_NORMED",  # 匹配方法
+    confidence=0.8              # 置信度阈值
+)
+```
+
+**支持的参数：**
+- `method`: 匹配方法 (`TM_CCOEFF_NORMED`, `TM_CCORR_NORMED`, `TM_SQDIFF_NORMED`, `TM_CCOEFF`, `TM_CCORR`, `TM_SQDIFF`)
+- `confidence`: 置信度阈值 (0.0-1.0)
+
+### 特征匹配参数
+
+```python
+result = tool.find_image(
+    "button.png",
+    algorithm="feature",
+    min_matches=10,             # 最小匹配数
+    confidence=0.7,             # 置信度阈值
+    nfeatures=1000,             # 特征点数量
+    scaleFactor=1.2,            # 缩放因子
+    nlevels=8,                  # 金字塔层数
+    edgeThreshold=15,           # 边缘阈值
+    patchSize=31,               # patch大小
+    fastThreshold=20            # FAST阈值
+)
+```
+
+**支持的参数：**
+- `min_matches`: 最小匹配数 (默认: 5)
+- `confidence`: 置信度阈值 (0.0-1.0)
+- `nfeatures`: ORB特征点数量 (默认: 500)
+- `scaleFactor`: 金字塔缩放因子 (默认: 1.1)
+- `nlevels`: 金字塔层数 (默认: 4)
+- `edgeThreshold`: 边缘阈值 (默认: 5)
+- `patchSize`: patch大小 (默认: 15)
+- `fastThreshold`: FAST阈值 (默认: 10)
+
+### 金字塔匹配参数
+
+```python
+result = tool.find_image(
+    "button.png",
+    algorithm="pyramid",
+    pyramid_levels=6,           # 金字塔层数
+    pyramid_scale_factor=0.7,   # 缩放因子
+    confidence=0.8,             # 置信度阈值
+    method="TM_CCOEFF_NORMED"   # 底层匹配方法
+)
+```
+
+**支持的参数：**
+- `pyramid_levels`: 金字塔层数 (默认: 4)
+- `pyramid_scale_factor`: 缩放因子 (默认: 0.5)
+- `confidence`: 置信度阈值 (默认: 0.8)
+- `method`: 底层匹配方法 (默认: 'TM_CCOEFF_NORMED')
+
+### 混合匹配参数
+
+```python
+result = tool.find_image(
+    "button.png",
+    algorithm="hybrid",
+    template_weight=0.7,        # 模板匹配权重
+    feature_weight=0.3,         # 特征匹配权重
+    confidence=0.8,             # 置信度阈值
+    method="TM_CCOEFF_NORMED",  # 模板匹配方法
+    min_matches=5               # 特征匹配最小匹配数
+)
+```
+
+**支持的参数：**
+- `template_weight`: 模板匹配权重 (默认: 0.6)
+- `feature_weight`: 特征匹配权重 (默认: 0.4)
+- `confidence`: 置信度阈值 (默认: 0.8)
+- `method`: 模板匹配方法 (默认: 'TM_CCOEFF_NORMED')
+- `min_matches`: 特征匹配最小匹配数 (默认: 5)
+
+### 参数配置示例
+
+```python
+# 高精度匹配
+result = tool.find_image(
+    "button.png",
+    algorithm="template",
+    method="TM_CCOEFF_NORMED",
+    confidence=0.95
+)
+
+# 快速匹配
+result = tool.find_image(
+    "button.png",
+    algorithm="pyramid",
+    pyramid_levels=3,
+    pyramid_scale_factor=0.8,
+    confidence=0.7
+)
+
+# 鲁棒性匹配
+result = tool.find_image(
+    "button.png",
+    algorithm="hybrid",
+    template_weight=0.4,
+    feature_weight=0.6,
+    confidence=0.8,
+    min_matches=10
+)
+
+# 多尺度匹配
+result = tool.find_image(
+    "button.png",
+    algorithm="pyramid",
+    pyramid_levels=8,
+    pyramid_scale_factor=0.6,
+    confidence=0.8,
+    method="TM_CCORR_NORMED"
+)
+```
+
 ## 使用示例
 
 ### 基本使用
@@ -380,14 +507,14 @@ tool = create_tool()
 
 # 使用默认算法查找图像
 result = tool.find_image("button.png")
-if result.success:
-    print(f"找到图像，位置: {result.position}")
+if result.found:
+    print(f"找到图像，位置: {result.center}")
     print(f"置信度: {result.confidence}")
 
 # 使用特定算法
 result = tool.find_image("button.png", algorithm="feature")
-if result.success:
-    print(f"特征匹配成功，位置: {result.position}")
+if result.found:
+    print(f"特征匹配成功，位置: {result.center}")
 ```
 
 ### 高级使用
@@ -413,20 +540,20 @@ result = algorithm.match(
 )
 
 # 检查结果
-if result.is_valid():
+if result.found:
     print(f"匹配成功:")
-    print(f"  位置: {result.position}")
+    print(f"  位置: {result.center}")
     print(f"  置信度: {result.confidence}")
-    print(f"  大小: {result.size}")
-    print(f"  缩放: {result.scale}")
-    print(f"  处理时间: {result.processing_time:.3f}秒")
+    print(f"  边界框: {result.bbox}")
+    print(f"  缩放: {result.scale_factor}")
+    print(f"  算法: {result.algorithm_name}")
     
     # 获取中心点
-    center = result.get_center()
+    center = result.center
     print(f"  中心点: {center}")
     
     # 获取边界
-    bounds = result.get_bounds()
+    bounds = result.bbox
     print(f"  边界: {bounds}")
 else:
     print("匹配失败")
@@ -450,8 +577,8 @@ for algo_name in algorithms:
 
 # 比较结果
 for algo_name, result in results.items():
-    if result.success:
-        print(f"{algo_name}: 成功, 置信度={result.confidence:.3f}, 时间={result.processing_time:.3f}s")
+    if result.found:
+        print(f"{algo_name}: 成功, 置信度={result.confidence:.3f}")
     else:
         print(f"{algo_name}: 失败")
 ```

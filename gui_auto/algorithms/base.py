@@ -56,11 +56,14 @@ class MatchResult:
             
             # 转换边界框坐标
             x, y, w, h = self.bbox
+            # 避免重复调用，先计算转换后的坐标
+            converted_coords = CoordinateUtils.convert_coordinates((x, y), "base", "system", scale_factors or {})
+            dpi_factor = scale_factors.get("dpi_factor", 1.0) if scale_factors else 1.0
             system_bbox = (
-                CoordinateUtils.convert_coordinates((x, y), "base", "system", scale_factors or {})[0],
-                CoordinateUtils.convert_coordinates((x, y), "base", "system", scale_factors or {})[1],
-                int(w * (scale_factors.get("dpi_factor", 1.0) if scale_factors else 1.0)),
-                int(h * (scale_factors.get("dpi_factor", 1.0) if scale_factors else 1.0))
+                converted_coords[0],
+                converted_coords[1],
+                int(w * dpi_factor),
+                int(h * dpi_factor)
             )
             
             return MatchResult(
@@ -100,11 +103,15 @@ class MatchResult:
             
             # 转换边界框坐标
             x, y, w, h = self.bbox
+            # 避免重复调用，先计算转换后的坐标
+            converted_coords = ScaleUtils.convert_coordinates_with_scale_record((x, y), scale_record, "to_original")
+            scale_x = scale_record.get("coordinate_mapping", {}).get("scale_x", 1.0)
+            scale_y = scale_record.get("coordinate_mapping", {}).get("scale_y", 1.0)
             original_bbox = (
-                ScaleUtils.convert_coordinates_with_scale_record((x, y), scale_record, "to_original")[0],
-                ScaleUtils.convert_coordinates_with_scale_record((x, y), scale_record, "to_original")[1],
-                int(w / scale_record.get("coordinate_mapping", {}).get("scale_x", 1.0)),
-                int(h / scale_record.get("coordinate_mapping", {}).get("scale_y", 1.0))
+                converted_coords[0],
+                converted_coords[1],
+                int(w / scale_x),
+                int(h / scale_y)
             )
             
             return MatchResult(
@@ -231,12 +238,33 @@ class MatchingAlgorithm(ABC):
         try:
             # 验证输入
             if not self.validate_input(template, target):
+                error_msg = f"输入验证失败: template={template is not None}, target={target is not None}"
+                if template is not None:
+                    error_msg += f", template_shape={template.shape if hasattr(template, 'shape') else 'unknown'}"
+                if target is not None:
+                    error_msg += f", target_shape={target.shape if hasattr(target, 'shape') else 'unknown'}"
+                
+                self.logger.error(error_msg)
                 return MatchResult(
                     found=False,
                     confidence=0.0,
                     center=(0, 0),
                     bbox=(0, 0, 0, 0),
-                    algorithm_name=self.get_name()
+                    algorithm_name=self.get_name(),
+                    metadata={
+                        "error": "input_validation_failed",
+                        "error_details": error_msg,
+                        "template_info": {
+                            "is_none": template is None,
+                            "shape": template.shape if template is not None and hasattr(template, 'shape') else None,
+                            "size": template.size if template is not None and hasattr(template, 'size') else None
+                        },
+                        "target_info": {
+                            "is_none": target is None,
+                            "shape": target.shape if target is not None and hasattr(target, 'shape') else None,
+                            "size": target.size if target is not None and hasattr(target, 'size') else None
+                        }
+                    }
                 )
             
             # 预处理图像
@@ -248,17 +276,47 @@ class MatchingAlgorithm(ABC):
             # 设置算法名称
             result.algorithm_name = self.get_name()
             
+            # 添加调试信息
+            if result.metadata is None:
+                result.metadata = {}
+            
+            result.metadata.update({
+                "template_original_shape": template.shape,
+                "target_original_shape": target.shape,
+                "template_processed_shape": template_processed.shape,
+                "target_processed_shape": target_processed.shape,
+                "config_info": {
+                    "has_config": config is not None,
+                    "config_type": type(config).__name__ if config else None
+                }
+            })
+            
             return result
             
         except Exception as e:
-            self.logger.error(f"Safe match failed: {e}")
+            error_msg = f"Safe match failed: {e}"
+            self.logger.error(error_msg, exc_info=True)
             return MatchResult(
                 found=False,
                 confidence=0.0,
                 center=(0, 0),
                 bbox=(0, 0, 0, 0),
                 algorithm_name=self.get_name(),
-                metadata={"error": str(e)}
+                metadata={
+                    "error": "safe_match_exception",
+                    "error_details": error_msg,
+                    "exception_type": type(e).__name__,
+                    "template_info": {
+                        "is_none": template is None,
+                        "shape": template.shape if template is not None and hasattr(template, 'shape') else None,
+                        "dtype": template.dtype if template is not None and hasattr(template, 'dtype') else None
+                    },
+                    "target_info": {
+                        "is_none": target is None,
+                        "shape": target.shape if target is not None and hasattr(target, 'shape') else None,
+                        "dtype": target.dtype if target is not None and hasattr(target, 'dtype') else None
+                    }
+                }
             )
 
 
@@ -362,6 +420,7 @@ class Matcher:
              target: Union[str, np.ndarray] = None,
              algorithm: str = "template",
              return_system_coordinates: bool = True,
+             confidence: float = 0.8,
              **kwargs) -> Optional[MatchResult]:
         """
         查找图像（简化坐标系统）
@@ -371,6 +430,7 @@ class Matcher:
             target: 目标图像，None表示使用屏幕截图
             algorithm: 使用的算法
             return_system_coordinates: 是否返回系统坐标
+            confidence: 置信度阈值
             **kwargs: 其他参数
             
         Returns:
@@ -402,32 +462,41 @@ class Matcher:
                     return None
                 target_image = target_result.data
             
-            # 调整目标图像到模板屏幕环境
-            adjust_result = image_ops.execute(
-                "adjust_to_template",
-                template_image=template_image,
-                target_image=target_image
-            )
+            # 直接使用原始目标图像进行匹配，不进行缩放调整
+            # 模板匹配应该在原始目标图像中寻找模板
+            adjusted_target = target_image
+            self._current_scale_record = {
+                "template_size": template_image.shape[:2],
+                "target_size": target_image.shape[:2],
+                "adjusted_size": target_image.shape[:2],
+                "scale_factors": {"dpi_factor": 1.0, "res_factor": 1.0, "total_factor": 1.0},
+                "coordinate_mapping": {
+                    "scale_x": 1.0,
+                    "scale_y": 1.0
+                }
+            }
             
-            if not adjust_result.success:
-                self.logger.error(f"Failed to adjust target to template: {adjust_result.error}")
-                return None
+            # 创建包含confidence和其他参数的配置
+            config_dict = {
+                'confidence': confidence,
+                'method': getattr(self.config, 'method', 'TM_CCOEFF_NORMED') if self.config else 'TM_CCOEFF_NORMED'
+            }
+            # 添加kwargs中的额外参数
+            config_dict.update(kwargs)
+            match_config = type('Config', (), config_dict)()
             
-            adjusted_data = adjust_result.data
-            adjusted_target = adjusted_data["adjusted_target"]
-            self._current_scale_record = adjusted_data["scale_record"]
-            
-            # 执行匹配
-            matcher = AlgorithmFactory.create_algorithm(algorithm, self.config)
-            result = matcher.safe_match(template_image, adjusted_target)
+            # 执行匹配 - 使用新的配置创建算法实例
+            matcher = AlgorithmFactory.create_algorithm(algorithm, match_config)
+            result = matcher.safe_match(template_image, adjusted_target, match_config)
             
             if not result.found:
                 return None
             
             # 根据配置返回坐标系统
             if return_system_coordinates:
-                # 直接返回系统坐标
-                return result.to_system_coordinates()
+                # 直接返回系统坐标，传递缩放因子
+                scale_factors = self._current_scale_record.get("scale_factors", {}) if self._current_scale_record else {}
+                return result.to_system_coordinates(scale_factors)
             else:
                 # 返回原始目标图像坐标系
                 return result.to_original_coordinates(self._current_scale_record)

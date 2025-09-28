@@ -111,9 +111,9 @@ def image_automation():
     
     for button in buttons:
         result = tool.find_image(button)
-        if result.success:
-            print(f"找到按钮 {button}，位置: {result.position}")
-            tool.click(result.position[0], result.position[1])
+        if result.found:
+            print(f"找到按钮 {button}，位置: {result.center}")
+            tool.click(result.center[0], result.center[1])
         else:
             print(f"未找到按钮 {button}")
 
@@ -218,8 +218,8 @@ if window_id:
 ```python
 # 图像查找
 result = tool.find_image("button.png")
-if result.success:
-    print(f"找到图像，位置: {result.position}")
+if result.found:
+    print(f"找到图像，位置: {result.center}")
     print(f"置信度: {result.confidence}")
 
 # 图像比较
@@ -338,13 +338,11 @@ tool.save_image(screenshot, "debug_screenshot.png")
 
 # 保存匹配结果
 result = tool.find_image("button.png")
-if result.success:
+if result.found:
     # 在匹配位置画框
     import cv2
-    cv2.rectangle(screenshot, result.position, 
-                  (result.position[0] + result.size[0], 
-                   result.position[1] + result.size[1]), 
-                  (0, 255, 0), 2)
+    x, y, w, h = result.bbox
+    cv2.rectangle(screenshot, (x, y), (x + w, y + h), (0, 255, 0), 2)
     cv2.imwrite("debug_match.png", screenshot)
 ```
 
@@ -405,6 +403,7 @@ result = tool.find_image(template)
 
 - 查看[主类API文档](main_class.md)了解完整的API
 - 查看[使用示例](examples.md)了解更多用法
+- 查看[参数配置指南](parameter_configuration.md)了解详细的参数设置
 - 查看[配置管理](core_modules.md)了解高级配置
 - 查看[算法模块](algorithms.md)了解图像匹配算法
 - 查看[操作模块](operations.md)了解详细操作

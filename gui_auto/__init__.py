@@ -6,7 +6,7 @@ GUI自动化框架
 from .core import GuiConfig, get_logger
 from .algorithms import AlgorithmFactory, MatchResult
 from .operations import OperationFactory, OperationManager
-from .platform import PlatformFactory, PlatformManager
+from .platform_utils import PlatformFactory, PlatformManager
 from .utils import ImageUtils, CoordinateUtils, ScaleUtils, FormatUtils
 
 # 导入类型提示
@@ -90,8 +90,8 @@ class GuiAutoToolV2:
                 template=template,
                 target=target,
                 algorithm=algorithm,
-                confidence=confidence,
                 return_system_coordinates=True,
+                confidence=confidence,
                 **kwargs
             )
             
