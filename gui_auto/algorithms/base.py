@@ -479,7 +479,7 @@ class Matcher:
             # 创建包含confidence和其他参数的配置
             config_dict = {
                 'confidence': confidence,
-                'method': getattr(self.config, 'method', 'TM_CCOEFF_NORMED') if self.config else 'TM_CCOEFF_NORMED'
+                # 'method': getattr(self.config, 'method', 'TM_CCOEFF_NORMED') if self.config else 'TM_CCOEFF_NORMED'
             }
             # 添加kwargs中的额外参数
             config_dict.update(kwargs)
